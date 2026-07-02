@@ -1,0 +1,39 @@
+# Configuration for the AirTouch climate control service (climate_service.py).
+#
+# All temperatures are in degrees Celsius. Unit names must match the names
+# configured in the AirTouch console exactly.
+
+[service]
+host = "192.168.5.221"        # AirTouch console (IoT VLAN — directed discovery)
+poll_interval_seconds = 30    # how often the control loop evaluates temperatures
+dry_run = false               # true = log intended commands without sending them
+
+[defaults]
+target_low = 23               # heat when a room drops below this
+target_high = 25.5            # cool when a room rises above this
+hysteresis = 0.4              # keep conditioning this far past the boundary before
+                              # switching a unit off (prevents rapid on/off cycling)
+mode_switch_buffer = 1.0      # a room must exceed the range by this much (and no
+                              # room may demand the current mode) before a master
+                              # flips between heating and cooling
+min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per group
+min_power_toggle_minutes = 10 # minimum time between on/off changes per unit
+manage_setpoints = true       # also push each unit's setpoint to match the range
+
+# Each group has one master unit that dictates heating/cooling mode for the
+# whole group. Mode commands are only ever sent to the master (without turning
+# it on); member units are only powered on/off.
+
+[groups.mpr]
+master = "MPR"
+members = ["MPR", "Bed 3", "Bed 4"]
+
+[groups.study]
+master = "Study"
+members = ["Study", "Living", "Master", "Bed 2"]
+
+# Per-room overrides of any [defaults] temperature value, e.g.:
+#
+# [rooms."Bed 3"]
+# target_low = 20.0
+# target_high = 23.0
