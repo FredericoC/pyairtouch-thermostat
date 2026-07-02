@@ -60,3 +60,8 @@ a group flips heat<->cool only when no room demands the current mode, a room is
 passed. Per-unit `min_power_toggle_minutes` prevents compressor short-cycling.
 All thresholds live in `config.toml`. Temperatures can be `None` — handle that
 when reading `current_temperature`.
+
+`[shutdown]` windows (`"HH:MM-HH:MM"` local time, may cross midnight) force a
+complete shutdown for night/away periods: while a window is active the control
+policy is suspended and every unit found on is powered off each poll,
+bypassing `min_power_toggle_minutes`.

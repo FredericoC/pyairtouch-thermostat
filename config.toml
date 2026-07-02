@@ -20,6 +20,16 @@ min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per gr
 min_power_toggle_minutes = 10 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range
 
+[shutdown]
+enabled = true                # master switch for the windows below
+windows = ["21:00-07:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
+                              # While a window is active every unit is forced
+                              # off, even if switched on manually. Add more
+                              # windows as extra list entries; for an "away"
+                              # mode use ["00:00-24:00"] (all day, every day).
+                              # The service reads this file only at startup —
+                              # restart it after changes.
+
 [history]
 enabled = true                # record per-unit temperature samples over time
 path = "history.db"           # SQLite file (relative to this config file)

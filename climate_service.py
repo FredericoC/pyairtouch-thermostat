@@ -11,6 +11,11 @@ no room still demands the current mode, at least one room exceeds its range by
 `mode_switch_buffer`, and `min_mode_dwell_minutes` has elapsed since the last
 flip.
 
+Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) force every
+unit off for night or away periods: while a window is active the normal
+control policy is suspended and any unit found on — even one switched on
+manually — is turned off on the next poll.
+
 Run with:
     python climate_service.py                 # uses ./config.toml
     python climate_service.py --dry-run       # log decisions, send nothing
@@ -26,6 +31,7 @@ import sys
 import time
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import pyairtouch
@@ -67,11 +73,47 @@ class Config:
     manage_setpoints: bool
     history_path: Path | None  # None = history recording disabled
     history_interval: float  # seconds
+    shutdown_windows: tuple[tuple[int, int], ...]  # (start, end) minutes past midnight
     groups: tuple[GroupConfig, ...]
     rooms: dict[str, RoomConfig]
 
     def room(self, name: str) -> RoomConfig:
         return self.rooms[name]
+
+    def shutdown_active(self, local_now: datetime) -> bool:
+        minute = local_now.hour * 60 + local_now.minute
+        for start, end in self.shutdown_windows:
+            if start < end:
+                if start <= minute < end:
+                    return True
+            elif minute >= start or minute < end:  # window crosses midnight
+                return True
+        return False
+
+
+def _parse_time_of_day(text: str, *, allow_2400: bool = False) -> int:
+    """Parse 'HH:MM' into minutes past midnight."""
+    hh, sep, mm = text.strip().partition(":")
+    if not sep or not hh.isdigit() or not mm.isdigit() or len(mm) != 2 or int(mm) > 59:
+        raise ValueError(f"invalid time of day {text!r} (expected HH:MM)")
+    minutes = int(hh) * 60 + int(mm)
+    if minutes > 24 * 60 or (minutes == 24 * 60 and not allow_2400):
+        raise ValueError(f"invalid time of day {text!r}")
+    return minutes
+
+
+def _parse_shutdown_window(spec: str) -> tuple[int, int]:
+    start_s, sep, end_s = spec.partition("-")
+    if not sep:
+        raise ValueError(
+            f"invalid shutdown window {spec!r} (expected 'HH:MM-HH:MM')"
+        )
+    start = _parse_time_of_day(start_s)
+    end = _parse_time_of_day(end_s, allow_2400=True)
+    if start == end:
+        # Zero length is surely a mistake — for all-day use "00:00-24:00".
+        raise ValueError(f"shutdown window {spec!r} has zero length")
+    return start, end
 
 
 def load_config(path: Path) -> Config:
@@ -121,6 +163,14 @@ def load_config(path: Path) -> Config:
                 f"threshold ({cfg.target_high - hysteresis})"
             )
 
+    shutdown = raw.get("shutdown", {})
+    shutdown_windows: tuple[tuple[int, int], ...] = ()
+    if shutdown.get("enabled", True):
+        specs = shutdown.get("windows", [])
+        if not isinstance(specs, list) or not all(isinstance(s, str) for s in specs):
+            raise ValueError("[shutdown] windows must be a list of 'HH:MM-HH:MM' strings")
+        shutdown_windows = tuple(_parse_shutdown_window(s) for s in specs)
+
     history = raw.get("history", {})
     history_path: Path | None = None
     if history.get("enabled", True):
@@ -141,6 +191,7 @@ def load_config(path: Path) -> Config:
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
         history_path=history_path,
         history_interval=float(history.get("interval_seconds", 60)),
+        shutdown_windows=shutdown_windows,
         groups=groups,
         rooms=rooms,
     )
@@ -295,6 +346,24 @@ class GroupController:
             unit.set_target_temperature(target),
         )
 
+    async def enforce_shutdown(self, now: float) -> None:
+        """Force every unit off, regardless of demand or anti-short-cycle timers.
+
+        Called instead of tick() while a shutdown window is active. Runs every
+        poll, so a unit switched on manually during the window is turned back
+        off within one poll interval.
+        """
+        for name in self._group.members:
+            unit = self._units[name]
+            room_state = self._state.rooms[name]
+            room_state.running_for = None
+            if unit.power_state in ON_STATES:
+                await self._send(
+                    f"[{self._group.name}] {name}: power → OFF (shutdown window)",
+                    unit.set_power(AcPowerControl.TURN_OFF),
+                )
+                room_state.last_power_change = now
+
     async def tick(self, now: float) -> None:
         mode = self._select_mode(now)
         master = self._units[self._group.master]
@@ -384,7 +453,7 @@ class GroupController:
             ))
         return rows
 
-    def status_report(self) -> tuple[str, list[str]]:
+    def status_report(self, *, shutdown: bool = False) -> tuple[str, list[str]]:
         """Render the group's status as human-readable lines.
 
         Returns a (signature, lines) pair. The signature excludes temperatures
@@ -411,7 +480,9 @@ class GroupController:
             running_for = self._state.rooms[name].running_for
 
             detail = ""
-            if on and running_for:
+            if shutdown:
+                activity = "shutdown" if not on else "shutdown, pending off"
+            elif on and running_for:
                 activity = f"{running_for.name.lower()}ing"
                 setpoint = unit.target_temperature
                 if setpoint is not None:
@@ -579,15 +650,22 @@ class ClimateService:
                 raise ConnectionError("AirTouch connection is no longer initialised")
 
             now = time.monotonic()
+            shutdown = self._cfg.shutdown_active(datetime.now())
             for controller in controllers:
-                await controller.tick(now)
+                if shutdown:
+                    await controller.enforce_shutdown(now)
+                else:
+                    await controller.tick(now)
 
             if self._history:
                 self._history.maybe_record(now, controllers)
 
             signatures, lines = [], []
+            if shutdown:
+                lines.append("SHUTDOWN window active — all units forced off")
+                signatures.append("shutdown")
             for controller in controllers:
-                sig, group_lines = controller.status_report()
+                sig, group_lines = controller.status_report(shutdown=shutdown)
                 signatures.append(sig)
                 lines.extend(group_lines)
             signature = "||".join(signatures)
