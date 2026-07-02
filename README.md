@@ -102,18 +102,46 @@ SELECT ts, unit, temperature FROM readings WHERE ts > unixepoch('now', '-1 day')
 
 Or from Python: `pd.read_sql_query("SELECT * FROM readings", sqlite3.connect("history.db"))`.
 
+### Web dashboard
+
+`webui.py` serves a browser dashboard over the recorded history — no extra
+dependencies, stdlib only:
+
+```sh
+python webui.py            # http://localhost:8765
+python webui.py --port 80  # custom port
+```
+
+It binds to all interfaces by default, so it's reachable from any device on
+the LAN at `http://<this-machine>:8765`. It shows:
+
+- a combined temperature-over-time chart for all 7 units;
+- one chart per unit, with the target range shaded and a heat/cool strip along
+  the bottom showing when the unit was running;
+- current temperature, activity, and a latest-readings table;
+- time range presets (6h–30d), hover tooltips, auto-refresh every 60s,
+  automatic light/dark mode.
+
+Endpoints: `/` (the page), `/api/data?hours=N` (downsampled JSON),
+`/api/readings.csv?hours=N` (raw CSV export). The database is opened
+read-only, so the dashboard can never interfere with the control service.
+
 ### Install as a service (macOS launchd)
 
 ```sh
-cp com.frederico.airtouch-climate.plist ~/Library/LaunchAgents/
+cp com.frederico.airtouch-climate.plist ~/Library/LaunchAgents/   # control service
+cp com.frederico.airtouch-webui.plist ~/Library/LaunchAgents/     # web dashboard
 launchctl load ~/Library/LaunchAgents/com.frederico.airtouch-climate.plist
+launchctl load ~/Library/LaunchAgents/com.frederico.airtouch-webui.plist
 
 # logs
 tail -f ~/Library/Logs/airtouch-climate.log
+tail -f ~/Library/Logs/airtouch-webui.log
 
 # stop / uninstall
 launchctl unload ~/Library/LaunchAgents/com.frederico.airtouch-climate.plist
+launchctl unload ~/Library/LaunchAgents/com.frederico.airtouch-webui.plist
 ```
 
-The plist assumes the repo lives at `/Users/Frederico/Projects/pyairtouch` —
-edit the paths if it moves. `KeepAlive` restarts the service if it ever exits.
+The plists assume the repo lives at `/Users/Frederico/Projects/pyairtouch` —
+edit the paths if it moves. `KeepAlive` restarts the services if they exit.

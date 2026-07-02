@@ -12,7 +12,11 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   configured temperature range, tuned via `config.toml`. Also records per-unit
   temperature samples to `history.db` (SQLite, `readings` table, ts in unix
   epoch UTC) for temperature-over-time graphs.
-- `com.frederico.airtouch-climate.plist` — launchd definition to run the service.
+- `webui.py` + `webui.html` — stdlib-only web dashboard over `history.db`
+  (default port 8765): combined + per-unit temperature charts, JSON/CSV API.
+  Reuses `load_config` from `climate_service.py`; opens the DB read-only.
+- `com.frederico.airtouch-climate.plist`, `com.frederico.airtouch-webui.plist`
+  — launchd definitions for the two services.
 
 There are no tests, linters, or build steps.
 
