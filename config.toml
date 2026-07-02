@@ -9,7 +9,7 @@ poll_interval_seconds = 30    # how often the control loop evaluates temperature
 dry_run = false               # true = log intended commands without sending them
 
 [defaults]
-target_low = 23               # heat when a room drops below this
+target_low = 24               # heat when a room drops below this
 target_high = 25.5            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
