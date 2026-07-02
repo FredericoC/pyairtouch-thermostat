@@ -105,15 +105,24 @@ def load_config(path: Path) -> Config:
             raise ValueError(
                 f"[rooms.{room_cfg_name!r}] does not match any group member"
             )
+    hysteresis = float(defaults.get("hysteresis", 0.4))
     for name, cfg in rooms.items():
         if cfg.target_low >= cfg.target_high:
             raise ValueError(f"room {name!r}: target_low must be < target_high")
+        if cfg.target_high - cfg.target_low <= 2 * hysteresis:
+            raise ValueError(
+                f"room {name!r}: range {cfg.target_low}–{cfg.target_high} is too "
+                f"narrow — it must be wider than 2 × hysteresis "
+                f"({2 * hysteresis}), or the heating-off threshold "
+                f"({cfg.target_low + hysteresis}) would overlap the cooling-off "
+                f"threshold ({cfg.target_high - hysteresis})"
+            )
 
     return Config(
         host=service.get("host", ""),
         poll_interval=float(service.get("poll_interval_seconds", 30)),
         dry_run=bool(service.get("dry_run", False)),
-        hysteresis=float(defaults.get("hysteresis", 0.4)),
+        hysteresis=hysteresis,
         mode_switch_buffer=float(defaults.get("mode_switch_buffer", 1.0)),
         min_mode_dwell=float(defaults.get("min_mode_dwell_minutes", 60)) * 60,
         min_power_toggle=float(defaults.get("min_power_toggle_minutes", 10)) * 60,
