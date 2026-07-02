@@ -25,6 +25,7 @@ Run with:
 import argparse
 import asyncio
 import logging
+import math
 import signal
 import sqlite3
 import sys
@@ -331,10 +332,14 @@ class GroupController:
     async def _apply_setpoint(self, name: str, mode: AcMode) -> None:
         unit = self._units[name]
         room = self._cfg.room(name)
+        # Whole-degree setpoints only (fractional values may not be honoured by
+        # the units). Round towards the demand side: up for heat, down for cool,
+        # so the unit's internal thermostat can't idle short of our power-off
+        # threshold (target_low/high ± hysteresis).
         if mode is AcMode.HEAT:
-            target = room.target_low + self._cfg.hysteresis
+            target = float(math.ceil(room.target_low + self._cfg.hysteresis))
         else:
-            target = room.target_high - self._cfg.hysteresis
+            target = float(math.floor(room.target_high - self._cfg.hysteresis))
         target = max(unit.min_target_temperature, min(unit.max_target_temperature, target))
         resolution = unit.target_temperature_resolution or 0.5
         current = unit.target_temperature
