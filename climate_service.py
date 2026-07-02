@@ -34,6 +34,8 @@ _LOGGER = logging.getLogger("climate")
 
 ON_STATES = frozenset({AcPowerState.ON, AcPowerState.ON_AWAY, AcPowerState.SLEEP})
 
+STATUS_HEARTBEAT = 15 * 60  # seconds between full status logs when nothing changes
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -244,10 +246,10 @@ class GroupController:
 
     async def _send(self, description: str, coro) -> None:
         if self._cfg.dry_run:
-            _LOGGER.info("DRY RUN: %s", description)
+            _LOGGER.info(">> CMD (dry-run) %s", description)
             coro.close()
             return
-        _LOGGER.info("%s", description)
+        _LOGGER.info(">> CMD %s", description)
         await coro
         # Small gap between consecutive commands to be gentle on the console.
         await asyncio.sleep(0.5)
@@ -261,13 +263,12 @@ class GroupController:
             target = room.target_high - self._cfg.hysteresis
         target = max(unit.min_target_temperature, min(unit.max_target_temperature, target))
         resolution = unit.target_temperature_resolution or 0.5
-        if (
-            unit.target_temperature is not None
-            and abs(unit.target_temperature - target) < resolution / 2
-        ):
+        current = unit.target_temperature
+        if current is not None and abs(current - target) < resolution / 2:
             return
+        current_s = f"{current:.1f}°C" if current is not None else "?"
         await self._send(
-            f"[{self._group.name}] {name}: setpoint -> {target:.1f}",
+            f"[{self._group.name}] {name}: setpoint {current_s} → {target:.1f}°C",
             unit.set_target_temperature(target),
         )
 
@@ -277,10 +278,11 @@ class GroupController:
 
         # Mode goes to the master only, and never powers it on.
         if master.selected_mode is not mode:
+            power = "on" if master.power_state in ON_STATES else "off"
             await self._send(
-                f"[{self._group.name}] master {self._group.master}: "
+                f"[{self._group.name}] {self._group.master} (master): "
                 f"mode {master.selected_mode.name if master.selected_mode else '?'} "
-                f"-> {mode.name} (unit stays {master.power_state.name if master.power_state else '?'})",
+                f"→ {mode.name} (unit stays {power})",
                 master.set_mode(mode, power_on=False),
             )
 
@@ -319,32 +321,72 @@ class GroupController:
         if should_run:
             if self._cfg.manage_setpoints:
                 await self._apply_setpoint(name, mode)
+            if mode is AcMode.HEAT:
+                reason = f"{temp:.1f}°C is below {room.target_low:.1f}°C"
+            else:
+                reason = f"{temp:.1f}°C is above {room.target_high:.1f}°C"
             await self._send(
-                f"[{self._group.name}] {name}: ON to {mode.name} "
-                f"({temp:.1f}°C, range {room.target_low:.1f}-{room.target_high:.1f})",
+                f"[{self._group.name}] {name}: power → ON, "
+                f"{mode.name.lower()}ing ({reason})",
                 unit.set_power(AcPowerControl.TURN_ON),
             )
         else:
             await self._send(
-                f"[{self._group.name}] {name}: OFF, satisfied "
-                f"({temp:.1f}°C, range {room.target_low:.1f}-{room.target_high:.1f})",
+                f"[{self._group.name}] {name}: power → OFF, satisfied "
+                f"({temp:.1f}°C, range {room.target_low:.1f}–{room.target_high:.1f})",
                 unit.set_power(AcPowerControl.TURN_OFF),
             )
         room_state.last_power_change = now
 
-    def status_line(self) -> str:
-        parts = []
+    def status_report(self) -> tuple[str, list[str]]:
+        """Render the group's status as human-readable lines.
+
+        Returns a (signature, lines) pair. The signature excludes temperatures
+        and setpoints so the caller can re-log the status only when something
+        meaningful changes (power, activity, mode) rather than on every 0.1°C
+        drift.
+        """
+        mode = self._state.desired_mode
+        opposite = AcMode.COOL if mode is AcMode.HEAT else AcMode.HEAT
+        master = self._units[self._group.master]
+        header = (
+            f"[{self._group.name}] mode {mode.name if mode else '?'}   "
+            f"master {self._group.master} "
+            f"({'on' if master.power_state in ON_STATES else 'off'})"
+        )
+        lines = [header]
+        sig_parts = [header]
+        name_width = max(len(n) for n in self._group.members)
         for name in self._group.members:
             unit = self._units[name]
+            room = self._cfg.room(name)
             temp = unit.current_temperature
             on = unit.power_state in ON_STATES
-            parts.append(
-                f"{name}={temp:.1f}°C/{'ON' if on else 'off'}"
-                if temp is not None
-                else f"{name}=?/{'ON' if on else 'off'}"
+            running_for = self._state.rooms[name].running_for
+
+            detail = ""
+            if on and running_for:
+                activity = f"{running_for.name.lower()}ing"
+                setpoint = unit.target_temperature
+                if setpoint is not None:
+                    detail = f" to {setpoint:.1f}°C"
+            elif on:
+                activity = "on, pending off"
+            elif mode and self._wants(name, mode):
+                activity = "pending on"
+            elif mode and self._wants(name, opposite):
+                activity = f"needs {opposite.name}, waiting for mode switch"
+            else:
+                activity = "in range"
+
+            temp_s = f"{temp:5.1f}°C" if temp is not None else "    ?°C"
+            lines.append(
+                f"  {name:<{name_width}}  {temp_s}  "
+                f"[{room.target_low:.1f}–{room.target_high:.1f}]  "
+                f"{'ON ' if on else 'off'}  {activity}{detail}"
             )
-        mode = self._state.desired_mode.name if self._state.desired_mode else "?"
-        return f"[{self._group.name}:{mode}] " + " ".join(parts)
+            sig_parts.append(f"{name}:{on}:{activity}")
+        return "|".join(sig_parts), lines
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +463,8 @@ class ClimateService:
         *,
         once: bool,
     ) -> None:
-        last_status = ""
+        last_signature = ""
+        last_logged = 0.0
         while not self._stop.is_set():
             if not airtouch.initialised:
                 raise ConnectionError("AirTouch connection is no longer initialised")
@@ -430,12 +473,22 @@ class ClimateService:
             for controller in controllers:
                 await controller.tick(now)
 
-            status = " | ".join(c.status_line() for c in controllers)
-            if status != last_status:
-                _LOGGER.info("%s", status)
-                last_status = status
+            signatures, lines = [], []
+            for controller in controllers:
+                sig, group_lines = controller.status_report()
+                signatures.append(sig)
+                lines.extend(group_lines)
+            signature = "||".join(signatures)
+            status = "\n".join(lines)
+
+            # Log the status block whenever something meaningful changed, and
+            # at least every STATUS_HEARTBEAT as a sign of life.
+            if signature != last_signature or now - last_logged >= STATUS_HEARTBEAT:
+                _LOGGER.info("status:\n%s", status)
+                last_signature = signature
+                last_logged = now
             else:
-                _LOGGER.debug("%s", status)
+                _LOGGER.debug("status:\n%s", status)
 
             if once:
                 return
@@ -467,6 +520,9 @@ async def main() -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
+    if not args.verbose:
+        # The library logs protocol details we don't need in the service log.
+        logging.getLogger("pyairtouch").setLevel(logging.WARNING)
 
     cfg = load_config(args.config)
     if args.dry_run:
