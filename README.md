@@ -81,6 +81,27 @@ python climate_service.py --dry-run          # continuous, no commands sent
 python climate_service.py                    # the real thing
 ```
 
+### Temperature history
+
+The service records a sample per unit (temperature, setpoint, power, mode,
+activity) to a SQLite database — `history.db` by default, every 60s, tunable
+in the `[history]` section of `config.toml`. This is the data source for
+future temperature-over-time graphs, per unit or all units overlaid.
+
+The schema is one `readings` table with `ts` (unix epoch seconds, UTC),
+`unit`, `temperature`, `setpoint`, `power` (0/1), `mode`, `activity`. Example
+queries:
+
+```sql
+-- one unit over time
+SELECT ts, temperature FROM readings WHERE unit = 'Bed 2' ORDER BY ts;
+
+-- all units, ready to pivot into one overlaid graph
+SELECT ts, unit, temperature FROM readings WHERE ts > unixepoch('now', '-1 day');
+```
+
+Or from Python: `pd.read_sql_query("SELECT * FROM readings", sqlite3.connect("history.db"))`.
+
 ### Install as a service (macOS launchd)
 
 ```sh

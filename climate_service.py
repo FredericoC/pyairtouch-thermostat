@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import sqlite3
 import sys
 import time
 import tomllib
@@ -64,6 +65,8 @@ class Config:
     min_mode_dwell: float  # seconds
     min_power_toggle: float  # seconds
     manage_setpoints: bool
+    history_path: Path | None  # None = history recording disabled
+    history_interval: float  # seconds
     groups: tuple[GroupConfig, ...]
     rooms: dict[str, RoomConfig]
 
@@ -118,6 +121,15 @@ def load_config(path: Path) -> Config:
                 f"threshold ({cfg.target_high - hysteresis})"
             )
 
+    history = raw.get("history", {})
+    history_path: Path | None = None
+    if history.get("enabled", True):
+        history_path = Path(history.get("path", "history.db"))
+        if not history_path.is_absolute():
+            # Relative paths are resolved against the config file so the
+            # database lands in the repo regardless of the working directory.
+            history_path = path.parent / history_path
+
     return Config(
         host=service.get("host", ""),
         poll_interval=float(service.get("poll_interval_seconds", 30)),
@@ -127,6 +139,8 @@ def load_config(path: Path) -> Config:
         min_mode_dwell=float(defaults.get("min_mode_dwell_minutes", 60)) * 60,
         min_power_toggle=float(defaults.get("min_power_toggle_minutes", 10)) * 60,
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
+        history_path=history_path,
+        history_interval=float(history.get("interval_seconds", 60)),
         groups=groups,
         rooms=rooms,
     )
@@ -347,6 +361,29 @@ class GroupController:
             )
         room_state.last_power_change = now
 
+    def history_rows(self) -> list[tuple]:
+        """One (unit, temperature, setpoint, power, mode, activity) per member."""
+        rows = []
+        for name in self._group.members:
+            unit = self._units[name]
+            on = unit.power_state in ON_STATES
+            running_for = self._state.rooms[name].running_for
+            if on and running_for:
+                activity = f"{running_for.name.lower()}ing"
+            elif on:
+                activity = "on"
+            else:
+                activity = "idle"
+            rows.append((
+                name,
+                unit.current_temperature,
+                unit.target_temperature,
+                1 if on else 0,
+                unit.selected_mode.name if unit.selected_mode else None,
+                activity,
+            ))
+        return rows
+
     def status_report(self) -> tuple[str, list[str]]:
         """Render the group's status as human-readable lines.
 
@@ -399,6 +436,59 @@ class GroupController:
 
 
 # ---------------------------------------------------------------------------
+# Temperature history
+
+
+class HistoryRecorder:
+    """Appends periodic per-unit samples to a SQLite database.
+
+    One row per unit per sample: enough to plot temperature over time for a
+    single unit or all units together, and to overlay power/mode activity.
+    """
+
+    _SCHEMA = """
+        CREATE TABLE IF NOT EXISTS readings (
+            ts          INTEGER NOT NULL,  -- unix epoch seconds (UTC)
+            unit        TEXT    NOT NULL,
+            temperature REAL,              -- NULL if the unit reports none
+            setpoint    REAL,
+            power       INTEGER NOT NULL,  -- 1 = on, 0 = off
+            mode        TEXT,              -- unit's selected mode (HEAT/COOL/...)
+            activity    TEXT NOT NULL      -- heating / cooling / on / idle
+        );
+        CREATE INDEX IF NOT EXISTS idx_readings_unit_ts ON readings (unit, ts);
+        CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (ts);
+    """
+
+    def __init__(self, path: Path, interval: float) -> None:
+        self._interval = interval
+        self._last_sample = 0.0  # monotonic; 0 so the first tick records
+        self._conn = sqlite3.connect(path)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.executescript(self._SCHEMA)
+        self._conn.commit()
+        _LOGGER.info("Recording temperature history to %s every %.0fs",
+                     path, interval)
+
+    def maybe_record(
+        self, now: float, controllers: list["GroupController"]
+    ) -> None:
+        if now - self._last_sample < self._interval:
+            return
+        self._last_sample = now
+        ts = int(time.time())
+        rows = [row for c in controllers for row in c.history_rows()]
+        self._conn.executemany(
+            "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(ts, *row) for row in rows],
+        )
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Service wrapper: connect, control loop, reconnect
 
 
@@ -406,6 +496,9 @@ class ClimateService:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._stop = asyncio.Event()
+        self._history: HistoryRecorder | None = None
+        if cfg.history_path is not None:
+            self._history = HistoryRecorder(cfg.history_path, cfg.history_interval)
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -445,6 +538,13 @@ class ClimateService:
         return airtouch, controllers
 
     async def run(self, *, once: bool = False) -> None:
+        try:
+            await self._run(once=once)
+        finally:
+            if self._history:
+                self._history.close()
+
+    async def _run(self, *, once: bool) -> None:
         backoff = 5.0
         while not self._stop.is_set():
             try:
@@ -481,6 +581,9 @@ class ClimateService:
             now = time.monotonic()
             for controller in controllers:
                 await controller.tick(now)
+
+            if self._history:
+                self._history.maybe_record(now, controllers)
 
             signatures, lines = [], []
             for controller in controllers:

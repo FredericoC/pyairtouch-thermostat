@@ -9,7 +9,9 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
 
 - `main.py` — single-script connectivity test (discover, connect, print status).
 - `climate_service.py` — long-running service that keeps each room inside a
-  configured temperature range, tuned via `config.toml`.
+  configured temperature range, tuned via `config.toml`. Also records per-unit
+  temperature samples to `history.db` (SQLite, `readings` table, ts in unix
+  epoch UTC) for temperature-over-time graphs.
 - `com.frederico.airtouch-climate.plist` — launchd definition to run the service.
 
 There are no tests, linters, or build steps.

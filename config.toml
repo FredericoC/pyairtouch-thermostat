@@ -20,6 +20,11 @@ min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per gr
 min_power_toggle_minutes = 10 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range
 
+[history]
+enabled = true                # record per-unit temperature samples over time
+path = "history.db"           # SQLite file (relative to this config file)
+interval_seconds = 60         # sample rate
+
 # Each group has one master unit that dictates heating/cooling mode for the
 # whole group. Mode commands are only ever sent to the master (without turning
 # it on); member units are only powered on/off.
