@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.frederico.airtouch-webui</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/Frederico/Projects/pyairtouch/.venv/bin/python</string>
+        <string>/Users/Frederico/Projects/pyairtouch/webui.py</string>
+        <string>--config</string>
+        <string>/Users/Frederico/Projects/pyairtouch/config.toml</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/Frederico/Projects/pyairtouch</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/Frederico/Library/Logs/airtouch-webui.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Frederico/Library/Logs/airtouch-webui.log</string>
+</dict>
+</plist>

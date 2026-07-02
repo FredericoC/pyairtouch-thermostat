@@ -1,0 +1,190 @@
+"""Browser interface for the AirTouch temperature history.
+
+Serves a single-page dashboard (webui.html) plus a small JSON/CSV API over the
+SQLite history recorded by climate_service.py. Stdlib only — no dependencies.
+
+Run with:
+    python webui.py                # http://localhost:8765, uses ./config.toml
+    python webui.py --port 9000
+"""
+
+import argparse
+import csv
+import io
+import json
+import logging
+import sqlite3
+import sys
+from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from climate_service import Config, load_config
+
+_LOGGER = logging.getLogger("webui")
+
+MAX_POINTS_PER_UNIT = 700  # downsample beyond this to keep payloads light
+MAX_HOURS = 24 * 90
+
+# Numeric encoding for the activity column, highest control-priority wins when
+# a downsample bucket mixes values. Decoded back to strings client-side.
+_ACTIVITY_CODE = "CASE activity WHEN 'heating' THEN 3 WHEN 'cooling' THEN 2 WHEN 'on' THEN 1 ELSE 0 END"
+_ACTIVITY_NAMES = {3: "heating", 2: "cooling", 1: "on", 0: None}
+
+
+class Api:
+    def __init__(self, cfg: Config) -> None:
+        if cfg.history_path is None:
+            raise SystemExit("history recording is disabled in the config; nothing to serve")
+        self._cfg = cfg
+        self._db_path = cfg.history_path
+        # Unit order = config group order; this is also the fixed color order.
+        self._units = [name for group in cfg.groups for name in group.members]
+
+    def _connect(self) -> sqlite3.Connection:
+        # Read-only so the dashboard can never interfere with the service.
+        return sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+
+    def data(self, hours: float) -> dict:
+        seconds = int(hours * 3600)
+        # Bucket size that keeps each unit under MAX_POINTS_PER_UNIT samples.
+        bucket = max(
+            int(self._cfg.history_interval),
+            seconds // MAX_POINTS_PER_UNIT,
+        )
+        # closing() is required: `with` on a sqlite3.Connection only manages
+        # the transaction — it does not close, and leaked connections exhaust
+        # the process file-descriptor limit after a few hours of auto-refresh.
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT (ts / :bucket) * :bucket + :bucket / 2 AS t,
+                       unit,
+                       ROUND(AVG(temperature), 2),
+                       ROUND(AVG(setpoint), 1),
+                       MAX(power),
+                       MAX({_ACTIVITY_CODE})
+                FROM readings
+                WHERE ts >= unixepoch('now') - :seconds
+                GROUP BY t, unit
+                ORDER BY t
+                """,
+                {"bucket": bucket, "seconds": seconds},
+            ).fetchall()
+
+        series: dict[str, list] = {unit: [] for unit in self._units}
+        for t, unit, temp, setpoint, power, activity in rows:
+            if unit in series:
+                series[unit].append(
+                    [t, temp, setpoint, power, _ACTIVITY_NAMES.get(activity)]
+                )
+        return {
+            "units": self._units,
+            "groups": {
+                g.name: {"master": g.master, "members": list(g.members)}
+                for g in self._cfg.groups
+            },
+            "ranges": {
+                name: [room.target_low, room.target_high]
+                for name, room in self._cfg.rooms.items()
+            },
+            "sample_interval": self._cfg.history_interval,
+            "bucket": bucket,
+            "series": series,
+        }
+
+    def csv(self, hours: float) -> str:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT ts, unit, temperature, setpoint, power, mode, activity
+                FROM readings
+                WHERE ts >= unixepoch('now') - ?
+                ORDER BY ts, unit
+                """,
+                (int(hours * 3600),),
+            ).fetchall()
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(["ts", "unit", "temperature", "setpoint", "power", "mode", "activity"])
+        writer.writerows(rows)
+        return out.getvalue()
+
+
+def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 (http.server API)
+            try:
+                self._route()
+            except BrokenPipeError:
+                pass
+            except Exception:
+                _LOGGER.exception("error handling %s", self.path)
+                self._respond(500, "text/plain", b"internal error")
+
+        def _route(self) -> None:
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            hours = min(MAX_HOURS, max(0.1, float(query.get("hours", ["24"])[0])))
+
+            if parsed.path == "/":
+                # Read per request so page tweaks don't need a restart.
+                self._respond(200, "text/html; charset=utf-8", html_path.read_bytes())
+            elif parsed.path == "/api/data":
+                body = json.dumps(api.data(hours)).encode()
+                self._respond(200, "application/json", body)
+            elif parsed.path == "/api/readings.csv":
+                self._respond(200, "text/csv", api.csv(hours).encode())
+            else:
+                self._respond(404, "text/plain", b"not found")
+
+        def _respond(self, status: int, content_type: str, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args) -> None:
+            _LOGGER.debug("%s %s", self.address_string(), format % args)
+
+    return Handler
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--config", type=Path, default=Path(__file__).parent / "config.toml",
+        help="path to the service TOML config (default: config.toml beside this script)",
+    )
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="bind address (default: all interfaces, LAN-accessible)")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--verbose", action="store_true", help="debug logging")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
+
+    api = Api(load_config(args.config))
+    handler = make_handler(api, Path(__file__).parent / "webui.html")
+    server = ThreadingHTTPServer((args.host, args.port), handler)
+    _LOGGER.info("Serving dashboard on http://%s:%d",
+                 "localhost" if args.host == "0.0.0.0" else args.host, args.port)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
