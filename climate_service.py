@@ -489,9 +489,14 @@ class GroupController:
                 activity = "shutdown" if not on else "shutdown, pending off"
             elif on and running_for:
                 activity = f"{running_for.name.lower()}ing"
+                if running_for is AcMode.HEAT:
+                    threshold = room.target_low + self._cfg.hysteresis
+                else:
+                    threshold = room.target_high - self._cfg.hysteresis
+                detail = f" to {threshold:.1f}°C"
                 setpoint = unit.target_temperature
                 if setpoint is not None:
-                    detail = f" to {setpoint:.1f}°C"
+                    detail += f" (unit set to {setpoint:.1f}°C)"
             elif on:
                 activity = "on, pending off"
             elif mode and self._wants(name, mode):
