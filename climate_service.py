@@ -11,10 +11,10 @@ no room still demands the current mode, at least one room exceeds its range by
 `mode_switch_buffer`, and `min_mode_dwell_minutes` has elapsed since the last
 flip.
 
-Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) force every
-unit off for night or away periods: while a window is active the normal
-control policy is suspended and any unit found on — even one switched on
-manually — is turned off on the next poll.
+Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
+unit off for night or away periods: when a window starts, a single off pass
+turns everything off and the normal control policy is suspended for the rest
+of the window. A unit switched on manually during the window is left alone.
 
 Run with:
     python climate_service.py                 # uses ./config.toml
@@ -354,9 +354,9 @@ class GroupController:
     async def enforce_shutdown(self, now: float) -> None:
         """Force every unit off, regardless of demand or anti-short-cycle timers.
 
-        Called instead of tick() while a shutdown window is active. Runs every
-        poll, so a unit switched on manually during the window is turned back
-        off within one poll interval.
+        Called once when a shutdown window starts (not every poll), so a unit
+        switched on manually during the window stays on until the control
+        policy resumes at the end of the window.
         """
         for name in self._group.members:
             unit = self._units[name]
@@ -486,7 +486,7 @@ class GroupController:
 
             detail = ""
             if shutdown:
-                activity = "shutdown" if not on else "shutdown, pending off"
+                activity = "shutdown" if not on else "on manually (shutdown window)"
             elif on and running_for:
                 activity = f"{running_for.name.lower()}ing"
                 if running_for is AcMode.HEAT:
@@ -577,6 +577,10 @@ class ClimateService:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._stop = asyncio.Event()
+        # True once the off pass for the current shutdown window has been sent;
+        # lives on the service so a reconnect mid-window does not repeat the
+        # pass and override manual changes.
+        self._was_shutdown = False
         self._history: HistoryRecorder | None = None
         if cfg.history_path is not None:
             self._history = HistoryRecorder(cfg.history_path, cfg.history_interval)
@@ -663,16 +667,21 @@ class ClimateService:
             shutdown = self._cfg.shutdown_active(datetime.now())
             for controller in controllers:
                 if shutdown:
-                    await controller.enforce_shutdown(now)
+                    # One off pass at window start only; manual changes made
+                    # during the window are left alone.
+                    if not self._was_shutdown:
+                        await controller.enforce_shutdown(now)
                 else:
                     await controller.tick(now)
+            self._was_shutdown = shutdown
 
             if self._history:
                 self._history.maybe_record(now, controllers)
 
             signatures, lines = [], []
             if shutdown:
-                lines.append("SHUTDOWN window active — all units forced off")
+                lines.append("SHUTDOWN window active — units switched off at "
+                             "window start; manual changes are respected")
                 signatures.append("shutdown")
             for controller in controllers:
                 sig, group_lines = controller.status_report(shutdown=shutdown)
