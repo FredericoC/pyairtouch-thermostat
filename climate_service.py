@@ -379,7 +379,7 @@ class GroupController:
             await self._send(
                 f"[{self._group.name}] {self._group.master} (master): "
                 f"mode {master.selected_mode.name if master.selected_mode else '?'} "
-                f"→ {mode.name} (unit stays {power})",
+                f"→ {mode.name}",
                 master.set_mode(mode, power_on=False),
             )
 

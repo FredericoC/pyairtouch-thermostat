@@ -10,7 +10,7 @@ dry_run = false               # true = log intended commands without sending the
 
 [defaults]
 target_low = 24               # heat when a room drops below this
-target_high = 25.5            # cool when a room rises above this
+target_high = 25              # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
 mode_switch_buffer = 1.0      # a room must exceed the range by this much (and no
@@ -22,7 +22,7 @@ manage_setpoints = true       # also push each unit's setpoint to match the rang
 
 [shutdown]
 enabled = true                # master switch for the windows below
-windows = ["21:00-07:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
+windows = ["20:00-08:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
                               # While a window is active every unit is forced
                               # off, even if switched on manually. Add more
                               # windows as extra list entries; for an "away"
@@ -47,8 +47,7 @@ members = ["MPR", "Bed 3", "Bed 4"]
 master = "Study"
 members = ["Study", "Living", "Master", "Bed 2"]
 
-# Per-room overrides of any [defaults] temperature value, e.g.:
-#
-# [rooms."Bed 3"]
-# target_low = 20.0
-# target_high = 23.0
+# Per-room overrides of any [defaults] temperature value
+[rooms."Bed 4"]
+target_low = 24
+target_high = 26
