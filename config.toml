@@ -40,11 +40,11 @@ interval_seconds = 60         # sample rate
 # whole group. Mode commands are only ever sent to the master (without turning
 # it on); member units are only powered on/off.
 
-[groups.mpr]
+[groups.north]
 master = "MPR"
 members = ["MPR", "Bed 3", "Bed 4"]
 
-[groups.study]
+[groups.south]
 master = "Study"
 members = ["Study", "Living", "Master", "Bed 2"]
 
