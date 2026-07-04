@@ -212,3 +212,11 @@ sudo systemctl daemon-reload
 (mirroring launchd's `KeepAlive`/`ThrottleInterval`), and
 `After=network-online.target` delays startup at boot until the network is up.
 The dashboard is then at `http://<pi-hostname>:8765`.
+
+## TODO
+
+- Fetch data from the Ecowitt weather station and plot outside temperature and
+  solar radiation (W/m²) alongside inside temperatures, to identify further
+  efficiencies (e.g. pre-cooling before solar load, using free heating/cooling
+  from outside conditions).
+- Have the web UI display live `climate_service` logs.
