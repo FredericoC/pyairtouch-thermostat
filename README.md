@@ -8,6 +8,12 @@ Tools for a Polyaire AirTouch 5 controller, using
 > zone-damper model doesn't apply here. If your setup uses zones, the control
 > logic won't map onto it without changes. Also, ~99% of this code was written
 > by [Claude](https://claude.com/claude-code).
+>
+> **Motivation:** the house is a passive house with an ERV, and I needed a way
+> to control the individual units to keep a reasonably consistent temperature
+> throughout. I also hate HVAC noise — which is why I chose a design with 
+> individual units that can be switched off once a room reaches temperature, 
+> instead of a ducted system running 24/7.
 
 Contents:
 
