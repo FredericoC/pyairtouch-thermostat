@@ -1,15 +1,16 @@
-# pyairtouch climate control
+# AirTouch 5 AC Unit climate control service
 
 Tools for a Polyaire AirTouch 5 controller, using
-[pyairtouch](https://pypi.org/project/pyairtouch/).
+[pyairtouch](https://pypi.org/project/pyairtouch/) (thank you!)
 
-> **Note:** This is built for one specific house: 7 individual AC units and
+> **Note:** This is built for my specific house: 7 individual AC units and
 > **no zones** — every unit is its own room, so the usual AirTouch
 > zone-damper model doesn't apply here. If your setup uses zones, the control
-> logic won't map onto it without changes. Also, ~99% of this code was written
-> by [Claude](https://claude.com/claude-code).
+> logic won't map onto it without changes. The config also caters to my needs
+> ~99% of this code was written by [Claude](https://claude.com/claude-code) 
+> using [pyairtouch](https://pypi.org/project/pyairtouch/).
 >
-> **Motivation:** the house is a passive house with an ERV, and I needed a way
+> **Motivation:** I have a passive house with an ERV, and I needed a way
 > to control the individual units to keep a reasonably consistent temperature
 > throughout. I also hate HVAC noise — which is why I chose a design with 
 > individual units that can be switched off once a room reaches temperature, 
