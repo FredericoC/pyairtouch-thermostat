@@ -1,7 +1,15 @@
 # pyairtouch climate control
 
 Tools for a Polyaire AirTouch 5 controller, using
-[pyairtouch](https://pypi.org/project/pyairtouch/):
+[pyairtouch](https://pypi.org/project/pyairtouch/).
+
+> **Note:** This is built for one specific house: 7 individual AC units and
+> **no zones** — every unit is its own room, so the usual AirTouch
+> zone-damper model doesn't apply here. If your setup uses zones, the control
+> logic won't map onto it without changes. Also, ~99% of this code was written
+> by [Claude](https://claude.com/claude-code).
+
+Contents:
 
 - `main.py` — minimal connectivity check (discover, connect, print status).
 - `climate_service.py` — a long-running whole-house climate control service
@@ -46,9 +54,9 @@ down. Press `Ctrl+C` to stop early.
 ## Climate control service
 
 `climate_service.py` keeps every room inside a configured temperature range by
-turning the individual AC units on and off. The house has 7 AC units in two
-groups, each with a **master** unit that dictates whether the group heats or
-cools:
+turning the individual AC units on and off. There are no zones to manage —
+the house has 7 individual AC units (one per room) in two groups, each with a
+**master** unit that dictates whether the group heats or cools:
 
 - **MPR** (master) → Bed 3, Bed 4
 - **Study** (master) → Living, Master, Bed 2
