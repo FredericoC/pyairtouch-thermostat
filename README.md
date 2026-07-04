@@ -6,7 +6,11 @@ Tools for a Polyaire AirTouch 5 controller, using
 > **Note:** This is built for my specific house: 7 individual AC units and
 > **no zones** — every unit is its own room, so the usual AirTouch
 > zone-damper model doesn't apply here. If your setup uses zones, the control
-> logic won't map onto it without changes. The config also caters to my needs
+> logic won't map onto it without changes. Every room also has an AirTouch
+> [Intelligent Temperature Sensor (ITS)](https://www.airtouch.net.au/smart-air-conditioning/intelligent-temperature-sensors/)
+> — critical for this to work well, since the ITS gives precise fractional
+> temperature readings that the control thresholds (e.g. 0.4° hysteresis)
+> rely on. The config also caters to my needs
 > ~99% of this code was slopped by [Claude](https://claude.com/claude-code) 
 > using [pyairtouch](https://pypi.org/project/pyairtouch/).
 >
@@ -118,6 +122,8 @@ SELECT ts, unit, temperature FROM readings WHERE ts > unixepoch('now', '-1 day')
 Or from Python: `pd.read_sql_query("SELECT * FROM readings", sqlite3.connect("history.db"))`.
 
 ### Web dashboard
+
+![Web dashboard showing temperature-over-time charts for all units](dashboard-image.png)
 
 `webui.py` serves a browser dashboard over the recorded history — no extra
 dependencies, stdlib only:
