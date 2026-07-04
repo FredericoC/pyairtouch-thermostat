@@ -126,7 +126,13 @@ Endpoints: `/` (the page), `/api/data?hours=N` (downsampled JSON),
 `/api/readings.csv?hours=N` (raw CSV export). The database is opened
 read-only, so the dashboard can never interfere with the control service.
 
-### Install as a service (macOS launchd)
+## Install as a service
+
+Both the control service and the web dashboard are meant to run permanently.
+Service definitions are included for macOS (launchd) and Raspberry Pi OS /
+any Linux with systemd.
+
+### macOS (launchd)
 
 ```sh
 cp com.frederico.airtouch-climate.plist ~/Library/LaunchAgents/   # control service
@@ -145,3 +151,56 @@ launchctl unload ~/Library/LaunchAgents/com.frederico.airtouch-webui.plist
 
 The plists assume the repo lives at `/Users/Frederico/Projects/pyairtouch` —
 edit the paths if it moves. `KeepAlive` restarts the services if they exit.
+
+### Raspberry Pi OS (systemd)
+
+Needs Python 3.11+ (`tomllib`), which Raspberry Pi OS Bookworm or later ships
+by default. On the Pi:
+
+```sh
+# 1. Get the code and set up the venv
+git clone <this repo> ~/pyairtouch
+cd ~/pyairtouch
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2. Sanity checks — the service uses local time for the shutdown windows,
+#    and needs to reach the AirTouch across the VLAN
+timedatectl                                   # check "Time zone" is correct
+.venv/bin/python main.py 192.168.5.221        # connectivity check
+.venv/bin/python climate_service.py --dry-run --once
+
+# 3. Install the units
+#    The unit files assume /home/pi/pyairtouch and User=pi — edit both
+#    files first if your username or checkout path differ.
+sudo cp airtouch-climate.service airtouch-webui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now airtouch-climate airtouch-webui
+```
+
+If the timezone is wrong, fix it with `sudo timedatectl set-timezone
+Australia/Adelaide` (or your zone) before enabling — otherwise the
+`[shutdown]` windows fire at the wrong hours.
+
+Manage the services:
+
+```sh
+systemctl status airtouch-climate airtouch-webui
+
+# logs (journald — no log files to manage)
+journalctl -u airtouch-climate -f
+journalctl -u airtouch-webui --since today
+
+# restart after editing config.toml (it is read only at startup)
+sudo systemctl restart airtouch-climate
+
+# stop / uninstall
+sudo systemctl disable --now airtouch-climate airtouch-webui
+sudo rm /etc/systemd/system/airtouch-climate.service /etc/systemd/system/airtouch-webui.service
+sudo systemctl daemon-reload
+```
+
+`Restart=always` with `RestartSec=30` restarts either service if it exits
+(mirroring launchd's `KeepAlive`/`ThrottleInterval`), and
+`After=network-online.target` delays startup at boot until the network is up.
+The dashboard is then at `http://<pi-hostname>:8765`.

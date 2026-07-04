@@ -1,0 +1,18 @@
+# systemd unit for the AirTouch web dashboard (Raspberry Pi OS).
+# Assumes the repo is checked out at /home/pi/pyairtouch with a .venv inside —
+# edit the paths and User= if yours differ, then see README.md for install steps.
+
+[Unit]
+Description=AirTouch web dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/pyairtouch
+ExecStart=/home/pi/pyairtouch/.venv/bin/python /home/pi/pyairtouch/webui.py --config /home/pi/pyairtouch/config.toml
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

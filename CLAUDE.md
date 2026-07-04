@@ -16,7 +16,9 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   (default port 8765): combined + per-unit temperature charts, JSON/CSV API.
   Reuses `load_config` from `climate_service.py`; opens the DB read-only.
 - `com.frederico.airtouch-climate.plist`, `com.frederico.airtouch-webui.plist`
-  — launchd definitions for the two services.
+  — launchd definitions for the two services (macOS);
+  `airtouch-climate.service`, `airtouch-webui.service` — systemd equivalents
+  (Raspberry Pi OS / Linux, paths assume `/home/pi/pyairtouch`).
 
 There are no tests, linters, or build steps.
 
