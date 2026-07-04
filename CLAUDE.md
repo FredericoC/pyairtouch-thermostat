@@ -10,8 +10,9 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
 - `main.py` — single-script connectivity test (discover, connect, print status).
 - `climate_service.py` — long-running service that keeps each room inside a
   configured temperature range, tuned via `config.toml`. Also records per-unit
-  temperature samples to `history.db` (SQLite, `readings` table, ts in unix
-  epoch UTC) for temperature-over-time graphs.
+  samples (temperature, setpoint, power, mode, activity) to `history.db`
+  (SQLite, `readings` table, ts in unix epoch UTC) — the data behind the web
+  dashboard's charts and activity strips.
 - `webui.py` + `webui.html` — stdlib-only web dashboard over `history.db`
   (default port 8765): combined + per-unit temperature charts, JSON/CSV API.
   Reuses `load_config` from `climate_service.py`; opens the DB read-only.
@@ -52,7 +53,10 @@ for their group (multi-split outdoor-unit constraint):
 
 Mode commands must only be sent to masters, via
 `ac.set_mode(mode, power_on=False)` so the master is not switched on as a side
-effect. Member units are only ever powered on/off (`ac.set_power(...)`).
+effect. All units — masters included — are powered on/off
+(`ac.set_power(...)`) purely on their own room's demand, and when
+`manage_setpoints` is on each also gets whole-degree setpoint commands
+(`ac.set_target_temperature(...)`, rounded toward the demand side).
 
 ## Control policy (climate_service.py)
 
