@@ -7,7 +7,7 @@ Tools for a Polyaire AirTouch 5 controller, using
 > **no zones** — every unit is its own room, so the usual AirTouch
 > zone-damper model doesn't apply here. If your setup uses zones, the control
 > logic won't map onto it without changes. The config also caters to my needs
-> ~99% of this code was written by [Claude](https://claude.com/claude-code) 
+> ~99% of this code was slopped by [Claude](https://claude.com/claude-code) 
 > using [pyairtouch](https://pypi.org/project/pyairtouch/).
 >
 > **Motivation:** I have a passive house with an ERV, and I needed a way
