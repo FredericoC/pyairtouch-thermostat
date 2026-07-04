@@ -9,7 +9,7 @@ poll_interval_seconds = 30    # how often the control loop evaluates temperature
 dry_run = false               # true = log intended commands without sending them
 
 [defaults]
-target_low = 24               # heat when a room drops below this
+target_low = 23               # heat when a room drops below this
 target_high = 25.5              # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
@@ -17,12 +17,12 @@ mode_switch_buffer = 1.0      # a room must exceed the range by this much (and n
                               # room may demand the current mode) before a master
                               # flips between heating and cooling
 min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per group
-min_power_toggle_minutes = 10 # minimum time between on/off changes per unit
+min_power_toggle_minutes = 15 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range
 
 [shutdown]
 enabled = true                # master switch for the windows below
-windows = ["20:00-08:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
+windows = ["20:00-07:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
                               # When a window starts every unit is switched
                               # off once; a unit switched on manually during
                               # the window stays on. Add more windows as extra
@@ -50,5 +50,5 @@ members = ["Study", "Living", "Master", "Bed 2"]
 
 # Per-room overrides of any [defaults] temperature value
 [rooms."Bed 4"]
-target_low = 24
+target_low = 23
 target_high = 26
