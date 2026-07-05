@@ -185,6 +185,9 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
             elif parsed.path == "/manifest.webmanifest":
                 self._respond(200, "application/manifest+json",
                               json.dumps(MANIFEST).encode())
+            elif parsed.path == "/sw.js":
+                sw = Path(__file__).parent / "sw.js"
+                self._respond(200, "application/javascript", sw.read_bytes())
             elif parsed.path in ("/icon-192.png", "/icon-512.png"):
                 icon = Path(__file__).parent / parsed.path.lstrip("/")
                 self._respond(200, "image/png", icon.read_bytes(),

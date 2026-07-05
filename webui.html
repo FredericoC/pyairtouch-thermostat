@@ -645,6 +645,11 @@ addEventListener("resize", () => {
 });
 darkMedia.addEventListener("change", render);
 
+// No-op service worker: older Chrome requires one before offering PWA
+// install. Registration silently does nothing on insecure origins.
+if ("serviceWorker" in navigator)
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+
 buildFilters();
 refresh();
 setInterval(refresh, 60_000);
