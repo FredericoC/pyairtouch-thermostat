@@ -60,6 +60,8 @@
     background: var(--surface-1); border: 1px solid var(--border);
     border-radius: 10px; padding: 14px 16px 10px; position: relative;
   }
+  .card.heating { border-color: var(--heat-wash); box-shadow: 0 0 0 1px var(--heat-wash); }
+  .card.cooling { border-color: var(--cool-wash); box-shadow: 0 0 0 1px var(--cool-wash); }
   .card h2 { font-size: 14px; font-weight: 600; }
   .card .meta { color: var(--text-muted); font-size: 12px; }
   #charts.loading .card { opacity: 0.6; transition: opacity .2s; }
@@ -439,6 +441,8 @@ function renderGrid() {
     if (isMaster) head.appendChild(htmlEl("span", "meta", "master"));
 
     const last = latest(state.data.series[unit]);
+    if (last && last[3] && (last[4] === "heating" || last[4] === "cooling"))
+      card.classList.add(last[4]);
     if (last && last[3]) {
       const chip = htmlEl("span", "chip");
       const dot = htmlEl("span", "dot");
