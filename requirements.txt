@@ -1,1 +1,2 @@
 pyairtouch>=3.3.0
+aioecowitt>=2026.6.0

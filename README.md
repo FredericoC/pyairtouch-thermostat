@@ -25,6 +25,9 @@ Contents:
 - `main.py` — minimal connectivity check (discover, connect, print status).
 - `climate_service.py` — a long-running whole-house climate control service
   (see below).
+- `ecowitt_listener.py` — receives live outdoor data (temperature, solar
+  W/m², …) pushed by the Ecowitt WS-2551 weather station; console setup and
+  details in [`ECOWITT.md`](ECOWITT.md).
 
 ## Setup
 
@@ -228,8 +231,9 @@ The dashboard is then at `http://<pi-hostname>:8765`.
 
 ## TODO
 
-- Fetch data from the Ecowitt weather station and plot outside temperature and
-  solar radiation (W/m²) alongside inside temperatures, to identify further
-  efficiencies (e.g. pre-cooling before solar load, using free heating/cooling
-  from outside conditions).
+- Plot outside temperature and solar radiation (W/m²) from the Ecowitt
+  weather station (received by `ecowitt_listener.py`, see
+  [`ECOWITT.md`](ECOWITT.md)) alongside inside temperatures, to identify
+  further efficiencies (e.g. pre-cooling before solar load, using free
+  heating/cooling from outside conditions).
 - Have the web UI display live `climate_service` logs.
