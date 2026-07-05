@@ -49,6 +49,10 @@ master = "Study"
 members = ["Study", "Living", "Master", "Bed 2"]
 
 # Per-room overrides of any [defaults] temperature value
-[rooms."Bed 4"]
-target_low = 23
-target_high = 26
+# [rooms."Bed 4"]
+# target_low = 23
+# target_high = 25.5
+#
+# [rooms."Master"]
+# target_low = 22.5
+# target_high = 26
