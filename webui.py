@@ -33,6 +33,25 @@ MAX_LOG_LINES = 2000
 _ACTIVITY_CODE = "CASE activity WHEN 'heating' THEN 3 WHEN 'cooling' THEN 2 WHEN 'on' THEN 1 ELSE 0 END"
 _ACTIVITY_NAMES = {3: "heating", 2: "cooling", 1: "on", 0: None}
 
+# Web app manifest so Chrome on Android installs the dashboard as a
+# standalone app ("Add to Home screen"). Chrome only honours standalone
+# display on secure origins — on plain LAN HTTP, allowlist the origin via
+# chrome://flags/#unsafely-treat-insecure-origin-as-secure on the device.
+MANIFEST = {
+    "name": "AirTouch temperatures",
+    "short_name": "AirTouch",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#f9f9f7",
+    "theme_color": "#f9f9f7",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png",
+         "purpose": "any maskable"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+         "purpose": "any maskable"},
+    ],
+}
+
 
 class Api:
     def __init__(self, cfg: Config) -> None:
@@ -163,14 +182,24 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
                 lines = min(MAX_LOG_LINES, max(1, int(query.get("lines", ["300"])[0])))
                 body = api.log_tail(lines).encode()
                 self._respond(200, "text/plain; charset=utf-8", body)
+            elif parsed.path == "/manifest.webmanifest":
+                self._respond(200, "application/manifest+json",
+                              json.dumps(MANIFEST).encode())
+            elif parsed.path in ("/icon-192.png", "/icon-512.png"):
+                icon = Path(__file__).parent / parsed.path.lstrip("/")
+                self._respond(200, "image/png", icon.read_bytes(),
+                              cache="public, max-age=86400")
             else:
                 self._respond(404, "text/plain", b"not found")
 
-        def _respond(self, status: int, content_type: str, body: bytes) -> None:
+        def _respond(
+            self, status: int, content_type: str, body: bytes,
+            cache: str = "no-store",
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             self.end_headers()
             self.wfile.write(body)
 

@@ -19,6 +19,10 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   (default port 8765): combined + per-unit temperature charts, JSON/CSV API,
   and a service-log panel (`/api/log` tails `climate.log`).
   Reuses `load_config` from `climate_service.py`; opens the DB read-only.
+  Installable as a standalone Android app: `/manifest.webmanifest` +
+  `icon-192.png`/`icon-512.png` (regenerate via an SDF-rendering script if
+  the design changes). Standalone mode needs a secure origin — on plain LAN
+  HTTP use chrome://flags/#unsafely-treat-insecure-origin-as-secure.
 - `com.frederico.airtouch-climate.plist`, `com.frederico.airtouch-webui.plist`
   — launchd definitions for the two services (macOS);
   `airtouch-climate.service`, `airtouch-webui.service` — systemd equivalents

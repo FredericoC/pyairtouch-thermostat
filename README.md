@@ -143,12 +143,29 @@ the LAN at `http://<this-machine>:8765`. It shows:
 - one chart per unit, with the target range shaded and a heat/cool strip along
   the bottom showing when the unit was running;
 - current temperature, activity, and a latest-readings table;
+- a collapsible service-log panel tailing the climate service's `climate.log`
+  (written via a rotating file handler, `log_file` in `config.toml`);
 - time range presets (6h–30d), hover tooltips, auto-refresh every 60s,
   automatic light/dark mode.
 
 Endpoints: `/` (the page), `/api/data?hours=N` (downsampled JSON),
-`/api/readings.csv?hours=N` (raw CSV export). The database is opened
-read-only, so the dashboard can never interfere with the control service.
+`/api/readings.csv?hours=N` (raw CSV export), `/api/log?lines=N` (log tail).
+The database is opened read-only, so the dashboard can never interfere with
+the control service.
+
+#### Install as an app (Android)
+
+The dashboard ships a web app manifest and icons, so Chrome can install it as
+a standalone home-screen app. Chrome only honours standalone mode on secure
+(HTTPS) origins; for a plain-HTTP LAN dashboard, allowlist it on the device
+first:
+
+1. Open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add
+   `http://<pi-hostname>:8765`, set the flag to Enabled and relaunch Chrome.
+2. Open the dashboard, then menu → **Add to Home screen** → **Install**.
+
+Without the flag (or HTTPS via a reverse proxy / Tailscale), the same menu
+still adds a shortcut, but it opens as a regular browser tab.
 
 ## Install as a service
 
@@ -217,7 +234,8 @@ Manage the services:
 ```sh
 systemctl status airtouch-climate airtouch-webui
 
-# logs (journald — no log files to manage)
+# logs (journald; the climate service also mirrors its log to climate.log,
+# self-rotating, for the dashboard's log panel)
 journalctl -u airtouch-climate -f
 journalctl -u airtouch-webui --since today
 
@@ -242,4 +260,3 @@ The dashboard is then at `http://<pi-hostname>:8765`.
   [`ECOWITT.md`](ECOWITT.md)) alongside inside temperatures, to identify
   further efficiencies (e.g. pre-cooling before solar load, using free
   heating/cooling from outside conditions).
-- Have the web UI display live `climate_service` logs.
