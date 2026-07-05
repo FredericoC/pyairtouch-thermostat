@@ -1,5 +1,5 @@
 # systemd unit for the AirTouch web dashboard (Raspberry Pi OS).
-# Assumes the repo is checked out at /home/pi/pyairtouch with a .venv inside —
+# Assumes the repo is checked out at /home/frederico/pyairtouch-thermostat with a .venv inside —
 # edit the paths and User= if yours differ, then see README.md for install steps.
 
 [Unit]
@@ -8,9 +8,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=pi
-WorkingDirectory=/home/pi/pyairtouch
-ExecStart=/home/pi/pyairtouch/.venv/bin/python /home/pi/pyairtouch/webui.py --config /home/pi/pyairtouch/config.toml
+User=frederico
+WorkingDirectory=/home/frederico/pyairtouch-thermostat
+ExecStart=/home/frederico/pyairtouch-thermostat/.venv/bin/python /home/frederico/pyairtouch-thermostat/webui.py --config /home/frederico/pyairtouch-thermostat/config.toml
 Restart=always
 RestartSec=30
 

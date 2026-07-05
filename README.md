@@ -178,15 +178,21 @@ edit the paths if it moves. `KeepAlive` restarts the services if they exit.
 
 ### Raspberry Pi OS (systemd)
 
-Needs Python 3.11+ (`tomllib`), which Raspberry Pi OS Bookworm or later ships
-by default. On the Pi:
+Needs Python 3.13+ (`aioecowitt` requires it), which is newer than what
+Raspberry Pi OS ships (Bookworm has 3.11). Use [uv](https://docs.astral.sh/uv/)
+— it downloads a managed Python 3.13 for the venv, no OS Python upgrade
+needed. On the Pi:
 
 ```sh
-# 1. Get the code and set up the venv
+# 0. Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc   # or open a new shell, so `uv` is on PATH
+
+# 1. Get the code and set up the venv on Python 3.13
 git clone <this repo> ~/pyairtouch
 cd ~/pyairtouch
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+uv venv --python 3.13 .venv
+uv pip install -r requirements.txt
 
 # 2. Sanity checks — the service uses local time for the shutdown windows,
 #    and needs to reach the AirTouch across the VLAN
