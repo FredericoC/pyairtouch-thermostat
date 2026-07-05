@@ -108,7 +108,9 @@
   .tooltip .extra { color: var(--text-muted); font-size: 11.5px; margin-top: 3px; }
 
   details { margin-top: 18px; }
+  details.card { margin-top: 0; }
   summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+  summary h2 { display: inline; }
   table { border-collapse: collapse; margin-top: 10px; font-size: 13px; }
   th, td { text-align: left; padding: 5px 18px 5px 0; border-bottom: 1px solid var(--grid); }
   th { color: var(--text-muted); font-weight: 500; font-size: 12px; }
@@ -148,7 +150,9 @@
 <div class="banner" id="banner"></div>
 
 <div id="charts">
-  <section class="card" id="combined"></section>
+  <details class="card" id="combined" open>
+    <summary><h2>All units</h2></summary>
+  </details>
   <div id="grid"></div>
 </div>
 
@@ -438,7 +442,10 @@ function latest(points) {
 function renderCombined() {
   const card = $("#combined");
   card.textContent = "";
-  card.appendChild(htmlEl("h2", null, "All units"));
+  const summary = htmlEl("summary");
+  summary.appendChild(htmlEl("h2", null, "All units"));
+  card.appendChild(summary);
+  if (!card.open) return; // collapsed: a hidden chart has no width to draw in
 
   const legend = htmlEl("div", "legend");
   for (const unit of state.data.units) {
@@ -606,6 +613,14 @@ async function refreshLog() {
 }
 logSection.addEventListener("toggle", refreshLog);
 setInterval(refreshLog, 30_000);
+
+/* Combined-chart collapse state, remembered per browser. */
+const combinedCard = $("#combined");
+combinedCard.open = localStorage.getItem("combinedOpen") !== "0";
+combinedCard.addEventListener("toggle", () => {
+  localStorage.setItem("combinedOpen", combinedCard.open ? "1" : "0");
+  if (state.data) renderCombined();
+});
 
 function buildFilters() {
   const filters = $("#filters");
