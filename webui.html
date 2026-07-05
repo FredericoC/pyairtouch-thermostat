@@ -42,6 +42,9 @@
   }
   h1 { font-size: 20px; font-weight: 600; }
   .sub { color: var(--text-muted); font-size: 12.5px; margin-top: 2px; }
+  #next { font-variant-numeric: tabular-nums; }
+  #next.stale { color: #e34948; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { #next.stale { color: #e66767; } }
 
   .filters { display: flex; gap: 6px; align-items: center; margin: 16px 0 14px; flex-wrap: wrap; }
   .filters button {
@@ -116,7 +119,7 @@
 <body>
 
 <h1>AirTouch temperatures</h1>
-<div class="sub" id="subtitle">Loading…</div>
+<div class="sub"><span id="subtitle">Loading…</span><span id="next"></span></div>
 
 <div class="filters" id="filters">
   <span class="spacer"></span>
@@ -498,8 +501,39 @@ function render() {
   renderTable();
   $("#subtitle").textContent =
     `Last ${RANGES.find((r) => r.hours === state.hours)?.label ?? state.hours + "h"}` +
-    ` · sampled every ${Math.round(state.data.sample_interval)}s · refreshes every 60s`;
+    ` · sampled every ${Math.round(state.data.sample_interval)}s`;
+  tickCountdown();
 }
+
+/* Countdown to the next history sample. The recorder writes on the first poll
+   tick at least sample_interval after the previous sample, so the newest ts in
+   the DB predicts the next write to within one poll interval. */
+let autoFetchedFor = null;
+function tickCountdown() {
+  const el = $("#next");
+  const d = state.data;
+  if (!d || d.latest_ts == null) { el.textContent = ""; return; }
+  const now = Date.now() / 1000;
+  const due = d.latest_ts + d.sample_interval;
+  const late = now - due;
+  const grace = (d.poll_interval || 30) + 5;
+  el.classList.toggle("stale", late > grace);
+  if (late < 0) {
+    el.textContent = ` · next update in ${Math.ceil(-late)}s`;
+  } else if (late <= grace) {
+    el.textContent = " · updating…";
+  } else {
+    const ago = now - d.latest_ts;
+    el.textContent = ` · last sample ${ago >= 90 ? Math.round(ago / 60) + "m" : Math.round(ago) + "s"} ago`;
+  }
+  // Refetch shortly after a sample is due so charts pick it up without waiting
+  // for the 60s interval; once per due time, the interval remains the fallback.
+  if (late >= 3 && late <= grace && autoFetchedFor !== due) {
+    autoFetchedFor = due;
+    refresh();
+  }
+}
+setInterval(tickCountdown, 1000);
 
 async function refresh() {
   $("#charts").classList.add("loading");

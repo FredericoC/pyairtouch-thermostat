@@ -72,6 +72,9 @@ class Api:
                 """,
                 {"bucket": bucket, "seconds": seconds},
             ).fetchall()
+            # Raw newest sample time (not bucketed): the client predicts the
+            # next write as latest_ts + sample_interval.
+            latest_ts = conn.execute("SELECT MAX(ts) FROM readings").fetchone()[0]
 
         series: dict[str, list] = {unit: [] for unit in self._units}
         for t, unit, temp, setpoint, power, activity in rows:
@@ -90,6 +93,8 @@ class Api:
                 for name, room in self._cfg.rooms.items()
             },
             "sample_interval": self._cfg.history_interval,
+            "poll_interval": self._cfg.poll_interval,
+            "latest_ts": latest_ts,
             "bucket": bucket,
             "series": series,
         }
