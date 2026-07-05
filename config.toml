@@ -7,6 +7,9 @@
 host = "192.168.5.221"        # AirTouch console (IoT VLAN — directed discovery)
 poll_interval_seconds = 30    # how often the control loop evaluates temperatures
 dry_run = false               # true = log intended commands without sending them
+log_file = "climate.log"      # service log file (relative to this config file),
+                              # rotated at ~1 MB and tailed by the web dashboard.
+                              # Set to "" to log to stdout only.
 
 [defaults]
 target_low = 23               # heat when a room drops below this

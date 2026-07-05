@@ -108,6 +108,19 @@
   th { color: var(--text-muted); font-weight: 500; font-size: 12px; }
   td.num { font-variant-numeric: tabular-nums; }
 
+  .log {
+    margin-top: 10px; padding: 10px 12px; max-height: 420px; overflow: auto;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .log .warn { color: #c98500; }
+  .log .err { color: #e34948; }
+  @media (prefers-color-scheme: dark) {
+    .log .warn { color: #eda100; }
+    .log .err { color: #e66767; }
+  }
+
   .banner {
     display: none; margin: 0 0 12px; padding: 8px 12px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--surface-1);
@@ -136,6 +149,11 @@
 <details>
   <summary>Data table (latest reading per unit)</summary>
   <table id="table"></table>
+</details>
+
+<details id="logSection">
+  <summary>Service log</summary>
+  <div class="log" id="log">Loading…</div>
 </details>
 
 <script>
@@ -553,6 +571,35 @@ async function refresh() {
     $("#charts").classList.remove("loading");
   }
 }
+
+/* Service log panel: fetched when opened, kept fresh while open. Traceback
+   continuation lines carry no level marker, so an ERROR line highlights
+   everything until the next timestamped line. */
+const logSection = $("#logSection");
+const LOG_LINE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (\w+)/;
+async function refreshLog() {
+  if (!logSection.open) return;
+  const el = $("#log");
+  try {
+    const res = await fetch("/api/log?lines=300");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    el.textContent = "";
+    let carry = null;
+    for (const line of text.split("\n")) {
+      const m = line.match(LOG_LINE);
+      if (m) carry = m[1] === "ERROR" || m[1] === "CRITICAL" ? "err"
+                   : m[1] === "WARNING" ? "warn" : null;
+      el.appendChild(htmlEl("div", carry, line || " "));
+    }
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  } catch (err) {
+    el.textContent = `Could not load log (${err.message}).`;
+  }
+}
+logSection.addEventListener("toggle", refreshLog);
+setInterval(refreshLog, 30_000);
 
 function buildFilters() {
   const filters = $("#filters");

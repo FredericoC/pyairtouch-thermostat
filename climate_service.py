@@ -25,6 +25,7 @@ Run with:
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import math
 import signal
 import sqlite3
@@ -43,6 +44,9 @@ _LOGGER = logging.getLogger("climate")
 ON_STATES = frozenset({AcPowerState.ON, AcPowerState.ON_AWAY, AcPowerState.SLEEP})
 
 STATUS_HEARTBEAT = 15 * 60  # seconds between full status logs when nothing changes
+
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +78,7 @@ class Config:
     manage_setpoints: bool
     history_path: Path | None  # None = history recording disabled
     history_interval: float  # seconds
+    log_path: Path | None  # None = file logging disabled (stdout only)
     shutdown_windows: tuple[tuple[int, int], ...]  # (start, end) minutes past midnight
     groups: tuple[GroupConfig, ...]
     rooms: dict[str, RoomConfig]
@@ -181,6 +186,13 @@ def load_config(path: Path) -> Config:
             # database lands in the repo regardless of the working directory.
             history_path = path.parent / history_path
 
+    log_file = str(service.get("log_file", "climate.log"))
+    log_path: Path | None = None
+    if log_file:
+        log_path = Path(log_file)
+        if not log_path.is_absolute():
+            log_path = path.parent / log_path
+
     return Config(
         host=service.get("host", ""),
         poll_interval=float(service.get("poll_interval_seconds", 30)),
@@ -192,6 +204,7 @@ def load_config(path: Path) -> Config:
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
         history_path=history_path,
         history_interval=float(history.get("interval_seconds", 60)),
+        log_path=log_path,
         shutdown_windows=shutdown_windows,
         groups=groups,
         rooms=rooms,
@@ -725,8 +738,8 @@ async def main() -> int:
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format=LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
         stream=sys.stdout,
     )
     if not args.verbose:
@@ -734,6 +747,15 @@ async def main() -> int:
         logging.getLogger("pyairtouch").setLevel(logging.WARNING)
 
     cfg = load_config(args.config)
+    if cfg.log_path is not None:
+        # Mirror the log to a file so the web dashboard can tail it. Rotation
+        # keeps the footprint small (the Pi runs off an SD card); the webui
+        # only reads the current file, so backups exist purely as history.
+        file_handler = logging.handlers.RotatingFileHandler(
+            cfg.log_path, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+        )
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATEFMT))
+        logging.getLogger().addHandler(file_handler)
     if args.dry_run:
         cfg = Config(**{**cfg.__dict__, "dry_run": True})
 

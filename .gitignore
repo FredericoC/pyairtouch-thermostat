@@ -5,3 +5,5 @@ __pycache__/
 history.db
 history.db-wal
 history.db-shm
+climate.log
+climate.log.*

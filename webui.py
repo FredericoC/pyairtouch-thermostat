@@ -26,6 +26,7 @@ _LOGGER = logging.getLogger("webui")
 
 MAX_POINTS_PER_UNIT = 700  # downsample beyond this to keep payloads light
 MAX_HOURS = 24 * 90
+MAX_LOG_LINES = 2000
 
 # Numeric encoding for the activity column, highest control-priority wins when
 # a downsample bucket mixes values. Decoded back to strings client-side.
@@ -116,6 +117,23 @@ class Api:
         writer.writerows(rows)
         return out.getvalue()
 
+    def log_tail(self, lines: int) -> str:
+        """Last `lines` lines of the climate service's log file.
+
+        The file is capped at ~1 MB by the service's rotating handler, so
+        reading it whole is cheap.
+        """
+        if self._cfg.log_path is None:
+            return "File logging is disabled in the config ([service] log_file)."
+        try:
+            text = self._cfg.log_path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return (
+                f"Log file not found: {self._cfg.log_path}\n"
+                "Restart climate_service.py to start file logging."
+            )
+        return "\n".join(text.splitlines()[-lines:])
+
 
 def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -141,6 +159,10 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
                 self._respond(200, "application/json", body)
             elif parsed.path == "/api/readings.csv":
                 self._respond(200, "text/csv", api.csv(hours).encode())
+            elif parsed.path == "/api/log":
+                lines = min(MAX_LOG_LINES, max(1, int(query.get("lines", ["300"])[0])))
+                body = api.log_tail(lines).encode()
+                self._respond(200, "text/plain; charset=utf-8", body)
             else:
                 self._respond(404, "text/plain", b"not found")
 
