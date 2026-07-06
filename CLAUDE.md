@@ -16,7 +16,7 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   (`[weather]` in the config, port 8090): the weather-station console pushes
   reports to it (see ECOWITT.md) and outdoor temperature + solar W/m² are
   recorded to the `weather` table, drawn on the dashboard's combined chart
-  (dashed grey "Outside" line on the °C axis; sun area in its own small panel
+  (solid grey "Outside" line on the °C axis; sun area in its own small panel
   below the time axis — never a second y-scale). Only one process can bind
   the port, so don't run `ecowitt_listener.py` (now just a standalone debug
   tool) alongside the service. Mirrors its log to `climate.log`

@@ -250,7 +250,7 @@ function tempTicks(lo, hi) {
    series: [{name, color, points: [[ts, temp, setpoint, power, activity], ...]}]
    opts: {height, band: [lo, hi] | null, powerStrip: bool, gap: seconds,
           weather: [[ts, outdoor °C, solar W/m²], ...] | undefined}
-   Weather draws the outdoor temperature as a dashed neutral line on the same
+   Weather draws the outdoor temperature as a solid neutral line on the same
    °C scale, and solar radiation in a small panel of its own below the time
    axis (its unit differs, and a second y-scale on one plot misleads). */
 function lineChart(container, series, opts) {
@@ -351,8 +351,8 @@ function lineChart(container, series, opts) {
     if (segStart != null) flush(pts[pts.length - 1][0]);
   }
 
-  // Outdoor temperature: dashed neutral line, under the unit lines — context,
-  // not another unit (dash + neutral ink keep it out of the categorical set).
+  // Outdoor temperature: solid neutral line, under the unit lines — context,
+  // not another unit (neutral ink keeps it out of the categorical set).
   if (outPts.length) {
     let d = "", pen = false, prevT = null;
     for (const p of outPts) {
@@ -363,7 +363,7 @@ function lineChart(container, series, opts) {
     }
     svg.appendChild(svgEl("path", {
       d, fill: "none", stroke: "var(--outside)", "stroke-width": 2,
-      "stroke-dasharray": "5 4", "stroke-linejoin": "round", "stroke-linecap": "round",
+      "stroke-linejoin": "round", "stroke-linecap": "round",
     }));
   }
 
@@ -486,7 +486,7 @@ function lineChart(container, series, opts) {
         outDot.setAttribute("cx", x(nearest));
         outDot.setAttribute("cy", y(w[1]));
         outDot.setAttribute("visibility", "visible");
-        rows.push({ s: { name: "Outside", color: "var(--outside)", dashed: true }, p: w });
+        rows.push({ s: { name: "Outside", color: "var(--outside)" }, p: w });
       } else {
         outDot.setAttribute("visibility", "hidden");
       }
@@ -583,7 +583,7 @@ function renderCombined() {
     legend.appendChild(item);
   };
   for (const unit of state.data.units) addItem(unit, unitColor(unit));
-  if (weather.some((p) => p[1] != null)) addItem("Outside", "var(--outside)", true);
+  if (weather.some((p) => p[1] != null)) addItem("Outside", "var(--outside)");
   if (weather.some((p) => p[2] != null)) addItem("Sun (W/m²)", "var(--sun)");
   card.appendChild(legend);
 
