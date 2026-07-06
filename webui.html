@@ -70,6 +70,8 @@
   }
   .filters .spacer { flex: 1; }
   .filters a { color: var(--text-muted); font-size: 12.5px; }
+  body.compact .filters .range { display: none; }
+  body.compact #combined { display: none; }
 
   .card {
     background: var(--surface-1); border: 1px solid var(--border);
@@ -93,6 +95,21 @@
   .unit-head .deg { color: var(--text-muted); font-size: 13px; font-weight: 400; }
   .chip { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 12px; }
   .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .chip.off { color: var(--text-muted); }
+
+  /* Compact view: small status tiles instead of chart cards. */
+  #grid.compact {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  .tile { padding: 10px 12px 9px; }
+  .tile-head { display: flex; align-items: baseline; gap: 6px; justify-content: space-between; }
+  .tile-head h2 { font-size: 13px; }
+  .tile .now { font-size: 22px; font-weight: 600; line-height: 1.25; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .deg { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+  /* Outside tile: context, not a unit — recessed wash instead of a surface. */
+  .tile.outside { background: var(--band); }
+  .tile.outside h2 { color: var(--text-secondary); font-weight: 500; }
 
   .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 0 2px; }
   .legend .item { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 12.5px; }
@@ -150,6 +167,7 @@
 <div class="sub"><span id="subtitle">Loading…</span><span id="next"></span></div>
 
 <div class="filters" id="filters">
+  <button id="compactBtn">Compact</button>
   <span class="spacer"></span>
   <a id="csvLink" href="/api/readings.csv?hours=24">Download CSV</a>
 </div>
@@ -191,7 +209,10 @@ const RANGES = [
 ];
 
 const darkMedia = matchMedia("(prefers-color-scheme: dark)");
-const state = { hours: 24, data: null, error: null };
+const state = {
+  hours: 24, data: null, error: null,
+  compact: localStorage.getItem("compactView") === "1",
+};
 
 const $ = (sel) => document.querySelector(sel);
 const colors = () => PALETTE[darkMedia.matches ? "dark" : "light"];
@@ -556,7 +577,23 @@ function latestWeather() {
   return { temp, sun: sunV };
 }
 
+function statusChip(last) {
+  const chip = htmlEl("span", "chip");
+  if (last && last[3]) {
+    const dot = htmlEl("span", "dot");
+    dot.style.background = last[4] === "heating" ? "var(--heat-wash)"
+      : last[4] === "cooling" ? "var(--cool-wash)" : "var(--baseline)";
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(last[4] || "on"));
+  } else {
+    chip.classList.add("off");
+    chip.textContent = "off";
+  }
+  return chip;
+}
+
 function renderCombined() {
+  if (state.compact) return; // hidden in compact view
   const card = $("#combined");
   const weather = state.data.weather || [];
   card.textContent = "";
@@ -595,38 +632,70 @@ function renderCombined() {
 function renderGrid() {
   const grid = $("#grid");
   grid.textContent = "";
+  grid.classList.toggle("compact", state.compact);
   for (const unit of state.data.units) {
-    const card = htmlEl("section", "card");
+    const last = latest(state.data.series[unit]);
+    const range = state.data.ranges[unit];
+    const card = htmlEl("section", state.compact ? "card tile" : "card");
+    if (last && last[3] && (last[4] === "heating" || last[4] === "cooling"))
+      card.classList.add(last[4]);
+
+    if (state.compact) {
+      const head = htmlEl("div", "tile-head");
+      head.appendChild(htmlEl("h2", null, unit));
+      head.appendChild(statusChip(last));
+      card.appendChild(head);
+      const now = htmlEl("div", "now", last ? fmtTemp(last[1]) : "–");
+      now.appendChild(htmlEl("span", "deg", " °C"));
+      card.appendChild(now);
+      const bits = [];
+      if (last && last[3] && last[2] != null) bits.push(`set ${last[2].toFixed(1)}°`);
+      bits.push(`${range[0].toFixed(1)}–${range[1].toFixed(1)}°`);
+      card.appendChild(htmlEl("div", "meta", bits.join(" · ")));
+      grid.appendChild(card);
+      continue;
+    }
+
     const head = htmlEl("div", "unit-head");
     head.appendChild(htmlEl("h2", null, unit));
 
     const isMaster = Object.values(state.data.groups).some((g) => g.master === unit);
     if (isMaster) head.appendChild(htmlEl("span", "meta", "master"));
 
-    const last = latest(state.data.series[unit]);
-    if (last && last[3] && (last[4] === "heating" || last[4] === "cooling"))
-      card.classList.add(last[4]);
-    if (last && last[3]) {
-      const chip = htmlEl("span", "chip");
-      const dot = htmlEl("span", "dot");
-      dot.style.background = last[4] === "heating" ? "var(--heat-wash)"
-        : last[4] === "cooling" ? "var(--cool-wash)" : "var(--baseline)";
-      chip.appendChild(dot);
-      chip.appendChild(document.createTextNode(last[4] || "on"));
-      head.appendChild(chip);
-    }
+    if (last && last[3]) head.appendChild(statusChip(last));
 
     const now = htmlEl("span", "now", last ? fmtTemp(last[1]) : "–");
     now.appendChild(htmlEl("span", "deg", " °C"));
     head.appendChild(now);
     card.appendChild(head);
 
-    const range = state.data.ranges[unit];
     card.appendChild(htmlEl("div", "meta", `target ${range[0].toFixed(1)}–${range[1].toFixed(1)} °C`));
     grid.appendChild(card);
 
     lineChart(card, [{ name: unit, color: unitColor(unit), points: state.data.series[unit] }],
       { height: 150, band: range, powerStrip: true, gap: gapSeconds() });
+  }
+
+  // Outside tile: the combined chart (and its outside/sun summary) is hidden
+  // in compact view, so surface the latest weather here instead.
+  const w = state.compact ? latestWeather() : {};
+  if (w.temp || w.sun) {
+    const card = htmlEl("section", "card tile outside");
+    const head = htmlEl("div", "tile-head");
+    head.appendChild(htmlEl("h2", null, "Outside"));
+    if (w.sun) {
+      const chip = htmlEl("span", "chip");
+      const dot = htmlEl("span", "dot");
+      dot.style.background = "var(--sun)";
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(`${Math.round(w.sun[2])} W/m²`));
+      head.appendChild(chip);
+    }
+    card.appendChild(head);
+    const now = htmlEl("div", "now", w.temp ? fmtTemp(w.temp[1]) : "–");
+    now.appendChild(htmlEl("span", "deg", " °C"));
+    card.appendChild(now);
+    grid.appendChild(card);
   }
 }
 
@@ -671,6 +740,7 @@ function render() {
   // layout mid-rebuild while most cards are empty, and a transiently shorter
   // page clamps the scroll position (a visible jump upward on mobile).
   document.body.style.minHeight = `${document.body.offsetHeight}px`;
+  document.body.classList.toggle("compact", state.compact);
   try {
     renderCombined();
     renderGrid();
@@ -772,8 +842,18 @@ combinedCard.addEventListener("toggle", () => {
 
 function buildFilters() {
   const filters = $("#filters");
+  const compactBtn = $("#compactBtn");
+  document.body.classList.toggle("compact", state.compact);
+  compactBtn.setAttribute("aria-pressed", String(state.compact));
+  compactBtn.addEventListener("click", () => {
+    state.compact = !state.compact;
+    localStorage.setItem("compactView", state.compact ? "1" : "0");
+    compactBtn.setAttribute("aria-pressed", String(state.compact));
+    document.body.classList.toggle("compact", state.compact);
+    render();
+  });
   for (const r of [...RANGES].reverse()) {
-    const btn = htmlEl("button", null, r.label);
+    const btn = htmlEl("button", "range", r.label);
     btn.setAttribute("aria-pressed", String(r.hours === state.hours));
     btn.addEventListener("click", () => {
       state.hours = r.hours;

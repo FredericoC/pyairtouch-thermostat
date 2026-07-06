@@ -24,7 +24,9 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   log panel.
 - `webui.py` + `webui.html` — stdlib-only web dashboard over `history.db`
   (default port 8765): combined + per-unit temperature charts, JSON/CSV API,
-  and a service-log panel (`/api/log` tails `climate.log`).
+  a service-log panel (`/api/log` tails `climate.log`), and a "Compact"
+  toggle (persisted in localStorage) that swaps the charts for small
+  at-a-glance status tiles — one screen on a phone.
   Reuses `load_config` from `climate_service.py`; opens the DB read-only.
   Installable as a standalone Android app: `/manifest.webmanifest` +
   `icon-192.png`/`icon-512.png` (regenerate via an SDF-rendering script if
