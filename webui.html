@@ -23,6 +23,9 @@
     --band: rgba(225, 224, 217, 0.45);
     --heat-wash: rgba(227, 73, 72, 0.55);
     --cool-wash: rgba(42, 120, 214, 0.55);
+    --outside: #52514e;
+    --sun: #d97a00;
+    --sun-fill: rgba(217, 122, 0, 0.12);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -37,6 +40,9 @@
       --band: rgba(44, 44, 42, 0.6);
       --heat-wash: rgba(230, 103, 103, 0.6);
       --cool-wash: rgba(57, 135, 229, 0.6);
+      --outside: #c3c2b7;
+      --sun: #f0a23c;
+      --sun-fill: rgba(240, 162, 60, 0.14);
     }
   }
   * { box-sizing: border-box; margin: 0; }
@@ -111,6 +117,7 @@
   details.card { margin-top: 0; }
   summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
   summary h2 { display: inline; }
+  summary .meta { margin-left: 10px; }
   table { border-collapse: collapse; margin-top: 10px; font-size: 13px; }
   th, td { text-align: left; padding: 5px 18px 5px 0; border-bottom: 1px solid var(--grid); }
   th { color: var(--text-muted); font-weight: 500; font-size: 12px; }
@@ -229,7 +236,7 @@ function timeTicks(t0, t1) {
 }
 
 function tempTicks(lo, hi) {
-  for (const step of [0.5, 1, 2, 5]) {
+  for (const step of [0.5, 1, 2, 5, 10]) {
     const first = Math.ceil(lo / step) * step;
     const n = Math.floor((hi - first) / step) + 1;
     if (n <= 6) {
@@ -241,13 +248,26 @@ function tempTicks(lo, hi) {
 
 /* Generic line chart with crosshair + tooltip.
    series: [{name, color, points: [[ts, temp, setpoint, power, activity], ...]}]
-   opts: {height, band: [lo, hi] | null, powerStrip: bool, gap: seconds} */
+   opts: {height, band: [lo, hi] | null, powerStrip: bool, gap: seconds,
+          weather: [[ts, outdoor °C, solar W/m²], ...] | undefined}
+   Weather draws the outdoor temperature as a dashed neutral line on the same
+   °C scale, and solar radiation in a small panel of its own below the time
+   axis (its unit differs, and a second y-scale on one plot misleads). */
 function lineChart(container, series, opts) {
   const width = container.clientWidth - 32; // card padding
-  const height = opts.height;
   const m = { top: 10, right: 12, bottom: 22, left: 34 };
-  const iw = width - m.left - m.right, ih = height - m.top - m.bottom;
+  const iw = width - m.left - m.right, ih = opts.height - m.top - m.bottom;
   if (iw <= 40) return;
+
+  const weather = opts.weather || [];
+  const outPts = weather.filter((p) => p[1] != null);
+  const sunPts = weather.filter((p) => p[2] != null);
+  // Sun panel geometry: below the main plot's x-axis labels, sharing x.
+  const sun = sunPts.length
+    ? { top: opts.height + 2, h: 46, max: Math.max(200, Math.ceil(Math.max(...sunPts.map((p) => p[2])) / 200) * 200) }
+    : null;
+  if (sun) sun.y = (v) => sun.top + (1 - v / sun.max) * sun.h;
+  const height = opts.height + (sun ? sun.h + 8 : 0);
 
   const now = Math.floor(Date.now() / 1000);
   const t0 = now - state.hours * 3600, t1 = now;
@@ -256,6 +276,7 @@ function lineChart(container, series, opts) {
   for (const s of series)
     for (const p of s.points)
       if (p[1] != null) { vLo = Math.min(vLo, p[1]); vHi = Math.max(vHi, p[1]); }
+  for (const p of outPts) { vLo = Math.min(vLo, p[1]); vHi = Math.max(vHi, p[1]); }
   if (opts.band) { vLo = Math.min(vLo, opts.band[0]); vHi = Math.max(vHi, opts.band[1]); }
   if (!isFinite(vLo)) { container.appendChild(htmlEl("div", "empty", "No data yet in this range")); return; }
   vLo = Math.floor((vLo - 0.3) * 2) / 2;
@@ -330,6 +351,60 @@ function lineChart(container, series, opts) {
     if (segStart != null) flush(pts[pts.length - 1][0]);
   }
 
+  // Outdoor temperature: dashed neutral line, under the unit lines — context,
+  // not another unit (dash + neutral ink keep it out of the categorical set).
+  if (outPts.length) {
+    let d = "", pen = false, prevT = null;
+    for (const p of outPts) {
+      if (prevT != null && p[0] - prevT > opts.gap) pen = false;
+      d += `${pen ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`;
+      pen = true;
+      prevT = p[0];
+    }
+    svg.appendChild(svgEl("path", {
+      d, fill: "none", stroke: "var(--outside)", "stroke-width": 2,
+      "stroke-dasharray": "5 4", "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+  }
+
+  // Sun panel: solar W/m² as a soft area on its own scale below the time axis.
+  if (sun) {
+    svg.appendChild(svgEl("line", {
+      x1: m.left, x2: m.left + iw, y1: sun.y(sun.max), y2: sun.y(sun.max),
+      stroke: "var(--grid)", "stroke-width": 1,
+    }));
+    svg.appendChild(svgEl("line", {
+      x1: m.left, x2: m.left + iw, y1: sun.y(0), y2: sun.y(0),
+      stroke: "var(--baseline)", "stroke-width": 1,
+    }));
+    for (const [v, label] of [[sun.max, String(sun.max)], [0, "0"]]) {
+      const text = svgEl("text", { x: m.left - 6, y: sun.y(v) + 3.5, "text-anchor": "end" });
+      text.textContent = label;
+      svg.appendChild(text);
+    }
+    let seg = [], prevT = null;
+    const flushSun = () => {
+      if (!seg.length) return;
+      const line = seg.map(([t, v], i) => `${i ? "L" : "M"}${x(t).toFixed(1)},${sun.y(v).toFixed(1)}`).join("");
+      svg.appendChild(svgEl("path", {
+        d: `${line}L${x(seg[seg.length - 1][0]).toFixed(1)},${sun.y(0).toFixed(1)}` +
+           `L${x(seg[0][0]).toFixed(1)},${sun.y(0).toFixed(1)}Z`,
+        fill: "var(--sun-fill)",
+      }));
+      svg.appendChild(svgEl("path", {
+        d: line, fill: "none", stroke: "var(--sun)", "stroke-width": 2,
+        "stroke-linejoin": "round", "stroke-linecap": "round",
+      }));
+      seg = [];
+    };
+    for (const p of sunPts) {
+      if (prevT != null && p[0] - prevT > opts.gap) flushSun();
+      seg.push([p[0], p[2]]);
+      prevT = p[0];
+    }
+    flushSun();
+  }
+
   // Series lines (2px, round joins, break across gaps/nulls)
   for (const s of series) {
     let d = "", pen = false, prevT = null;
@@ -348,26 +423,34 @@ function lineChart(container, series, opts) {
   }
 
   // Crosshair + tooltip
+  const plotBottom = sun ? sun.y(0) : m.top + ih;
   const cross = svgEl("line", {
-    y1: m.top, y2: m.top + ih, stroke: "var(--baseline)", "stroke-width": 1, visibility: "hidden",
+    y1: m.top, y2: plotBottom, stroke: "var(--baseline)", "stroke-width": 1, visibility: "hidden",
   });
   svg.appendChild(cross);
-  const dots = series.map((s) => {
+  const mkDot = (color) => {
     const dot = svgEl("circle", {
-      r: 4, fill: s.color, stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden",
+      r: 4, fill: color, stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden",
     });
     svg.appendChild(dot);
     return dot;
-  });
+  };
+  const dots = series.map((s) => mkDot(s.color));
+  const outDot = outPts.length ? mkDot("var(--outside)") : null;
+  const sunDot = sun ? mkDot("var(--sun)") : null;
 
   const tooltip = htmlEl("div", "tooltip");
   container.appendChild(tooltip);
 
-  const times = [...new Set(series.flatMap((s) => s.points.map((p) => p[0])))].sort((a, b) => a - b);
+  const times = [...new Set([
+    ...series.flatMap((s) => s.points.map((p) => p[0])),
+    ...weather.map((p) => p[0]),
+  ])].sort((a, b) => a - b);
   const byTime = series.map((s) => new Map(s.points.map((p) => [p[0], p])));
+  const weatherByTime = new Map(weather.map((p) => [p[0], p]));
 
   const hover = svgEl("rect", {
-    x: m.left, y: m.top, width: iw, height: ih, fill: "transparent",
+    x: m.left, y: m.top, width: iw, height: plotBottom - m.top, fill: "transparent",
   });
   svg.appendChild(hover);
 
@@ -397,13 +480,35 @@ function lineChart(container, series, opts) {
         dots[i].setAttribute("visibility", "hidden");
       }
     });
+    const w = weatherByTime.get(nearest);
+    if (outDot) {
+      if (w && w[1] != null) {
+        outDot.setAttribute("cx", x(nearest));
+        outDot.setAttribute("cy", y(w[1]));
+        outDot.setAttribute("visibility", "visible");
+        rows.push({ s: { name: "Outside", color: "var(--outside)", dashed: true }, p: w });
+      } else {
+        outDot.setAttribute("visibility", "hidden");
+      }
+    }
     rows.sort((a, b) => b.p[1] - a.p[1]);
-    for (const { s, p } of rows) {
+    if (sunDot) {
+      if (w && w[2] != null) {
+        sunDot.setAttribute("cx", x(nearest));
+        sunDot.setAttribute("cy", sun.y(w[2]));
+        sunDot.setAttribute("visibility", "visible");
+        rows.push({ s: { name: "sun", color: "var(--sun)" }, p: w, val: `${Math.round(w[2])} W/m²` });
+      } else {
+        sunDot.setAttribute("visibility", "hidden");
+      }
+    }
+    for (const { s, p, val } of rows) {
       const row = htmlEl("div", "row");
       const key = htmlEl("span", "key");
       key.style.borderTopColor = s.color;
+      if (s.dashed) key.style.borderTopStyle = "dashed";
       row.appendChild(key);
-      row.appendChild(htmlEl("span", "val", `${p[1].toFixed(1)}°`));
+      row.appendChild(htmlEl("span", "val", val ?? `${p[1].toFixed(1)}°`));
       row.appendChild(htmlEl("span", "name", s.name));
       tooltip.appendChild(row);
     }
@@ -426,6 +531,8 @@ function lineChart(container, series, opts) {
   function hide() {
     cross.setAttribute("visibility", "hidden");
     dots.forEach((d) => d.setAttribute("visibility", "hidden"));
+    outDot?.setAttribute("visibility", "hidden");
+    sunDot?.setAttribute("visibility", "hidden");
     tooltip.style.display = "none";
   }
   hover.addEventListener("pointermove", (e) => showAt(e.clientX));
@@ -439,28 +546,50 @@ function latest(points) {
   return null;
 }
 
+function latestWeather() {
+  const weather = state.data.weather || [];
+  let temp = null, sunV = null;
+  for (let i = weather.length - 1; i >= 0 && (temp == null || sunV == null); i--) {
+    if (temp == null && weather[i][1] != null) temp = weather[i];
+    if (sunV == null && weather[i][2] != null) sunV = weather[i];
+  }
+  return { temp, sun: sunV };
+}
+
 function renderCombined() {
   const card = $("#combined");
+  const weather = state.data.weather || [];
   card.textContent = "";
   const summary = htmlEl("summary");
   summary.appendChild(htmlEl("h2", null, "All units"));
+  const now = latestWeather();
+  if (now.temp || now.sun) {
+    const bits = [];
+    if (now.temp) bits.push(`outside ${now.temp[1].toFixed(1)} °C`);
+    if (now.sun) bits.push(`sun ${Math.round(now.sun[2])} W/m²`);
+    summary.appendChild(htmlEl("span", "meta", bits.join(" · ")));
+  }
   card.appendChild(summary);
   if (!card.open) return; // collapsed: a hidden chart has no width to draw in
 
   const legend = htmlEl("div", "legend");
-  for (const unit of state.data.units) {
+  const addItem = (label, color, dashed) => {
     const item = htmlEl("span", "item");
     const key = htmlEl("span", "key");
-    key.style.borderTopColor = unitColor(unit);
+    key.style.borderTopColor = color;
+    if (dashed) key.style.borderTopStyle = "dashed";
     item.appendChild(key);
-    item.appendChild(htmlEl("span", null, unit));
+    item.appendChild(htmlEl("span", null, label));
     legend.appendChild(item);
-  }
+  };
+  for (const unit of state.data.units) addItem(unit, unitColor(unit));
+  if (weather.some((p) => p[1] != null)) addItem("Outside", "var(--outside)", true);
+  if (weather.some((p) => p[2] != null)) addItem("Sun (W/m²)", "var(--sun)");
   card.appendChild(legend);
 
   lineChart(card, state.data.units.map((unit) => ({
     name: unit, color: unitColor(unit), points: state.data.series[unit],
-  })), { height: 300, band: null, powerStrip: false, gap: gapSeconds() });
+  })), { height: 300, band: null, powerStrip: false, gap: gapSeconds(), weather });
 }
 
 function renderGrid() {
@@ -517,6 +646,17 @@ function renderTable() {
     tr.appendChild(htmlEl("td", null, p ? (p[3] ? "on" : "off") : "–"));
     tr.appendChild(htmlEl("td", null, (p && p[4]) || "–"));
     tr.appendChild(htmlEl("td", null, p ? fmtFull(p[0]) : "–"));
+    table.appendChild(tr);
+  }
+  const w = latestWeather();
+  if (w.temp || w.sun) {
+    const tr = htmlEl("tr");
+    tr.appendChild(htmlEl("td", null, "Outside"));
+    tr.appendChild(htmlEl("td", "num", w.temp ? `${fmtTemp(w.temp[1])} °C` : "–"));
+    tr.appendChild(htmlEl("td", "num", "–"));
+    tr.appendChild(htmlEl("td", null, "–"));
+    tr.appendChild(htmlEl("td", null, w.sun ? `sun ${Math.round(w.sun[2])} W/m²` : "–"));
+    tr.appendChild(htmlEl("td", null, fmtFull((w.temp || w.sun)[0])));
     table.appendChild(tr);
   }
 }

@@ -37,6 +37,16 @@ enabled = true                # record per-unit temperature samples over time
 path = "history.db"           # SQLite file (relative to this config file)
 interval_seconds = 60         # sample rate
 
+[weather]
+enabled = true                # receive Ecowitt customized-upload reports and
+                              # record outdoor temperature + solar W/m² to the
+                              # history DB (shown on the dashboard's combined
+                              # chart). The console must be pointed at this
+                              # host — see ECOWITT.md. Only one process can
+                              # own the port: stop ecowitt_listener.py first.
+port = 8090                   # port the console POSTs to
+path = "/data/report/"        # URL path the console POSTs to
+
 # Each group has one master unit that dictates heating/cooling mode for the
 # whole group. Mode commands are only ever sent to the master (without turning
 # it on); member units are only powered on/off.

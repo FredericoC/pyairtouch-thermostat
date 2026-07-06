@@ -95,6 +95,21 @@ class Api:
             # Raw newest sample time (not bucketed): the client predicts the
             # next write as latest_ts + sample_interval.
             latest_ts = conn.execute("SELECT MAX(ts) FROM readings").fetchone()[0]
+            try:
+                weather = conn.execute(
+                    """
+                    SELECT (ts / :bucket) * :bucket + :bucket / 2 AS t,
+                           ROUND(AVG(outdoor_temp), 2),
+                           ROUND(AVG(solar), 1)
+                    FROM weather
+                    WHERE ts >= unixepoch('now') - :seconds
+                    GROUP BY t
+                    ORDER BY t
+                    """,
+                    {"bucket": bucket, "seconds": seconds},
+                ).fetchall()
+            except sqlite3.OperationalError:
+                weather = []  # database predates the weather table
 
         series: dict[str, list] = {unit: [] for unit in self._units}
         for t, unit, temp, setpoint, power, activity in rows:
@@ -117,6 +132,7 @@ class Api:
             "latest_ts": latest_ts,
             "bucket": bucket,
             "series": series,
+            "weather": weather,  # [[t, outdoor °C, solar W/m²], ...]
         }
 
     def csv(self, hours: float) -> str:

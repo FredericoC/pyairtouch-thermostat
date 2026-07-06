@@ -76,6 +76,8 @@ class Config:
     manage_setpoints: bool
     history_path: Path | None  # None = history recording disabled
     history_interval: float  # seconds
+    weather_port: int | None  # None = Ecowitt weather listener disabled
+    weather_path: str
     log_path: Path | None  # None = file logging disabled (stdout only)
     shutdown_windows: tuple[tuple[int, int], ...]  # (start, end) minutes past midnight
     groups: tuple[GroupConfig, ...]
@@ -184,6 +186,11 @@ def load_config(path: Path) -> Config:
             # database lands in the repo regardless of the working directory.
             history_path = path.parent / history_path
 
+    weather = raw.get("weather", {})
+    weather_port: int | None = None
+    if weather.get("enabled", True):
+        weather_port = int(weather.get("port", 8090))
+
     log_file = str(service.get("log_file", "climate.log"))
     log_path: Path | None = None
     if log_file:
@@ -201,6 +208,8 @@ def load_config(path: Path) -> Config:
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
         history_path=history_path,
         history_interval=float(history.get("interval_seconds", 60)),
+        weather_port=weather_port,
+        weather_path=str(weather.get("path", "/data/report/")),
         log_path=log_path,
         shutdown_windows=shutdown_windows,
         groups=groups,
@@ -529,6 +538,76 @@ class GroupController:
 
 
 # ---------------------------------------------------------------------------
+# Weather (Ecowitt customized upload)
+
+
+WEATHER_STALE_AFTER = 5 * 60  # seconds without a fresh value before it's dropped
+
+
+class WeatherStation:
+    """Receives Ecowitt customized-upload reports and exposes the latest values.
+
+    The HP2551 console has no pollable API — it HTTP-POSTs all sensor values
+    to a configured server on a fixed interval (see ECOWITT.md). This embeds
+    that server (aioecowitt) in the service so outdoor conditions land in the
+    history database alongside the unit samples.
+    """
+
+    def __init__(self, port: int, path: str) -> None:
+        self._port = port
+        self._path = path
+        self._listener = None
+
+    async def start(self) -> None:
+        from aioecowitt import EcoWittListener
+
+        # One console report per minute would otherwise add an aiohttp access
+        # log line to the service log each time.
+        logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+        listener = EcoWittListener(port=self._port, path=self._path)
+        try:
+            await listener.start()
+        except OSError as exc:
+            _LOGGER.error(
+                "Ecowitt listener failed to start on port %d (%s) — weather "
+                "recording disabled. Is the standalone ecowitt_listener.py "
+                "still running?", self._port, exc,
+            )
+            return
+        self._listener = listener
+        _LOGGER.info("Ecowitt listener on port %d (path %s)", self._port, self._path)
+
+    async def stop(self) -> None:
+        if self._listener is not None:
+            await self._listener.stop()
+            self._listener = None
+
+    def sample(self, now: float) -> tuple[float | None, float | None] | None:
+        """Latest (outdoor °C, solar W/m²), or None when there's nothing fresh.
+
+        Stale values (console offline, sensor dropout) become None so the
+        charts show a gap instead of a flat line.
+        """
+        temp = self._fresh_value("tempc", now)
+        solar = self._fresh_value("solarradiation", now)
+        if temp is None and solar is None:
+            return None
+        return temp, solar
+
+    def _fresh_value(self, key: str, now: float) -> float | None:
+        if self._listener is None:
+            return None
+        for sensor in self._listener.sensors.values():
+            if (
+                sensor.key == key
+                and sensor.value is not None
+                and now - sensor.last_update_m <= WEATHER_STALE_AFTER
+            ):
+                return float(sensor.value)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Temperature history
 
 
@@ -551,6 +630,12 @@ class HistoryRecorder:
         );
         CREATE INDEX IF NOT EXISTS idx_readings_unit_ts ON readings (unit, ts);
         CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (ts);
+        CREATE TABLE IF NOT EXISTS weather (
+            ts           INTEGER NOT NULL,  -- unix epoch seconds (UTC)
+            outdoor_temp REAL,              -- °C, NULL if missing/stale
+            solar        REAL               -- W/m², NULL if missing/stale
+        );
+        CREATE INDEX IF NOT EXISTS idx_weather_ts ON weather (ts);
     """
 
     def __init__(self, path: Path, interval: float) -> None:
@@ -564,7 +649,10 @@ class HistoryRecorder:
                      path, interval)
 
     def maybe_record(
-        self, now: float, controllers: list["GroupController"]
+        self,
+        now: float,
+        controllers: list["GroupController"],
+        weather: tuple[float | None, float | None] | None = None,
     ) -> None:
         if now - self._last_sample < self._interval:
             return
@@ -575,6 +663,8 @@ class HistoryRecorder:
             "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(ts, *row) for row in rows],
         )
+        if weather is not None:
+            self._conn.execute("INSERT INTO weather VALUES (?, ?, ?)", (ts, *weather))
         self._conn.commit()
 
     def close(self) -> None:
@@ -596,6 +686,9 @@ class ClimateService:
         self._history: HistoryRecorder | None = None
         if cfg.history_path is not None:
             self._history = HistoryRecorder(cfg.history_path, cfg.history_interval)
+        self._weather: WeatherStation | None = None
+        if cfg.weather_port is not None:
+            self._weather = WeatherStation(cfg.weather_port, cfg.weather_path)
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -635,9 +728,15 @@ class ClimateService:
         return airtouch, controllers
 
     async def run(self, *, once: bool = False) -> None:
+        # The weather listener lives outside the connect/reconnect loop: it
+        # keeps receiving console reports while the AirTouch is unreachable.
+        if self._weather:
+            await self._weather.start()
         try:
             await self._run(once=once)
         finally:
+            if self._weather:
+                await self._weather.stop()
             if self._history:
                 self._history.close()
 
@@ -688,7 +787,10 @@ class ClimateService:
             self._was_shutdown = shutdown
 
             if self._history:
-                self._history.maybe_record(now, controllers)
+                self._history.maybe_record(
+                    now, controllers,
+                    self._weather.sample(now) if self._weather else None,
+                )
 
             signatures, lines = [], []
             if shutdown:

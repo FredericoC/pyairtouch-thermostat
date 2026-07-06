@@ -43,6 +43,12 @@ listener on a host in the IoT VLAN.
 
 ## Running the listener
 
+The listener is embedded in `climate_service.py` (`[weather]` in
+`config.toml`): the service records outdoor temperature and solar W/m² to the
+`weather` table in `history.db`, and the dashboard draws them on the combined
+chart. Only one process can bind port 8090 — `ecowitt_listener.py` remains as
+a standalone debug tool for when the service isn't running:
+
 ```sh
 source .venv/bin/activate
 python ecowitt_listener.py                    # listen on port 8090
