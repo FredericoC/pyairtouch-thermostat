@@ -70,9 +70,8 @@ effect. All units — masters included — are powered on/off
 ## Control policy (climate_service.py)
 
 Per-room on/off thermostat with hysteresis, plus sticky group mode selection:
-a group flips heat<->cool only when no room demands the current mode, a room is
-`mode_switch_buffer` degrees past its range, and `min_mode_dwell_minutes` has
-passed. Per-unit `min_power_toggle_minutes` prevents compressor short-cycling.
+a group flips heat<->cool only when no room demands the current mode, a room
+demands the opposite mode, and `min_mode_dwell_minutes` has passed. Per-unit `min_power_toggle_minutes` prevents compressor short-cycling.
 All thresholds live in `config.toml`. Temperatures can be `None` — handle that
 when reading `current_temperature`.
 

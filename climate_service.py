@@ -7,9 +7,8 @@ powering them on — and all units (masters included) are powered on/off purely
 on their own room's demand.
 
 Heat/cool mode switching is deliberately sticky: a group only flips mode when
-no room still demands the current mode, at least one room exceeds its range by
-`mode_switch_buffer`, and `min_mode_dwell_minutes` has elapsed since the last
-flip.
+no room still demands the current mode, at least one room demands the opposite
+mode, and `min_mode_dwell_minutes` has elapsed since the last flip.
 
 Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
 unit off for night or away periods: when a window starts, a single off pass
@@ -72,7 +71,6 @@ class Config:
     poll_interval: float
     dry_run: bool
     hysteresis: float
-    mode_switch_buffer: float
     min_mode_dwell: float  # seconds
     min_power_toggle: float  # seconds
     manage_setpoints: bool
@@ -198,7 +196,6 @@ def load_config(path: Path) -> Config:
         poll_interval=float(service.get("poll_interval_seconds", 30)),
         dry_run=bool(service.get("dry_run", False)),
         hysteresis=hysteresis,
-        mode_switch_buffer=float(defaults.get("mode_switch_buffer", 1.0)),
         min_mode_dwell=float(defaults.get("min_mode_dwell_minutes", 60)) * 60,
         min_power_toggle=float(defaults.get("min_power_toggle_minutes", 10)) * 60,
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
@@ -274,17 +271,6 @@ class GroupController:
         threshold = room.target_high - (self._cfg.hysteresis if running else 0.0)
         return temp > threshold
 
-    def _exceeds_buffer(self, name: str, mode: AcMode) -> bool:
-        """Whether a room is past its range by more than the mode-switch buffer."""
-        unit = self._units[name]
-        temp = unit.current_temperature
-        if temp is None:
-            return False
-        room = self._cfg.room(name)
-        if mode is AcMode.HEAT:
-            return temp < room.target_low - self._cfg.mode_switch_buffer
-        return temp > room.target_high + self._cfg.mode_switch_buffer
-
     # -- mode selection ----------------------------------------------------
 
     def _select_mode(self, now: float) -> AcMode:
@@ -308,23 +294,21 @@ class GroupController:
         if not demand_opposite or demand_current:
             return current
 
-        past_buffer = [n for n in demand_opposite if self._exceeds_buffer(n, opposite)]
-        if not past_buffer:
-            return current
         if (
             state.last_mode_change is not None
             and now - state.last_mode_change < self._cfg.min_mode_dwell
         ):
             remaining = self._cfg.min_mode_dwell - (now - state.last_mode_change)
             _LOGGER.info(
-                "[%s] would switch to %s (%s past buffer) but mode dwell has %dm left",
-                self._group.name, opposite.name, ", ".join(past_buffer), remaining // 60,
+                "[%s] would switch to %s (for %s) but mode dwell has %dm left",
+                self._group.name, opposite.name, ", ".join(demand_opposite),
+                remaining // 60,
             )
             return current
 
         _LOGGER.info(
             "[%s] switching mode %s -> %s (demand from: %s)",
-            self._group.name, current.name, opposite.name, ", ".join(past_buffer),
+            self._group.name, current.name, opposite.name, ", ".join(demand_opposite),
         )
         state.desired_mode = opposite
         state.last_mode_change = now
@@ -471,25 +455,12 @@ class GroupController:
             ))
         return rows
 
-    def _mode_switch_blocker(self, name: str, now: float) -> str:
-        """Which gate is currently stopping the group flipping modes for `name`."""
+    def _mode_switch_blocker(self, now: float) -> str:
+        """Which gate is currently stopping the group flipping modes."""
         mode = self._state.desired_mode
-        opposite = AcMode.COOL if mode is AcMode.HEAT else AcMode.HEAT
         holding = [m for m in self._group.members if self._wants(m, mode)]
         if holding:
             return f"blocked by {', '.join(holding)} still needing {mode.name}"
-        if not any(
-            self._exceeds_buffer(m, opposite)
-            for m in self._group.members
-            if self._wants(m, opposite)
-        ):
-            room = self._cfg.room(name)
-            temp = self._units[name].current_temperature
-            if opposite is AcMode.COOL:
-                limit = room.target_high + self._cfg.mode_switch_buffer
-                return f"{temp:.1f} < {limit:.1f}°C buffer"
-            limit = room.target_low - self._cfg.mode_switch_buffer
-            return f"{temp:.1f} > {limit:.1f}°C buffer"
         last = self._state.last_mode_change
         if last is not None and now - last < self._cfg.min_mode_dwell:
             remaining = self._cfg.min_mode_dwell - (now - last)
@@ -543,7 +514,7 @@ class GroupController:
                 activity = "pending on"
             elif mode and self._wants(name, opposite):
                 activity = f"needs {opposite.name}, waiting for mode switch"
-                detail = f" ({self._mode_switch_blocker(name, now)})"
+                detail = f" ({self._mode_switch_blocker(now)})"
             else:
                 activity = "in range"
 

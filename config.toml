@@ -17,9 +17,6 @@ target_low = 22.6             # heat when a room drops below this
 target_high = 24.8            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
-mode_switch_buffer = 1.0      # a room must exceed the range by this much (and no
-                              # room may demand the current mode) before a master
-                              # flips between heating and cooling
 min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per group
 min_power_toggle_minutes = 15 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range
