@@ -471,7 +471,34 @@ class GroupController:
             ))
         return rows
 
-    def status_report(self, *, shutdown: bool = False) -> tuple[str, list[str]]:
+    def _mode_switch_blocker(self, name: str, now: float) -> str:
+        """Which gate is currently stopping the group flipping modes for `name`."""
+        mode = self._state.desired_mode
+        opposite = AcMode.COOL if mode is AcMode.HEAT else AcMode.HEAT
+        holding = [m for m in self._group.members if self._wants(m, mode)]
+        if holding:
+            return f"blocked by {', '.join(holding)} still needing {mode.name}"
+        if not any(
+            self._exceeds_buffer(m, opposite)
+            for m in self._group.members
+            if self._wants(m, opposite)
+        ):
+            room = self._cfg.room(name)
+            temp = self._units[name].current_temperature
+            if opposite is AcMode.COOL:
+                limit = room.target_high + self._cfg.mode_switch_buffer
+                return f"{temp:.1f} < {limit:.1f}°C buffer"
+            limit = room.target_low - self._cfg.mode_switch_buffer
+            return f"{temp:.1f} > {limit:.1f}°C buffer"
+        last = self._state.last_mode_change
+        if last is not None and now - last < self._cfg.min_mode_dwell:
+            remaining = self._cfg.min_mode_dwell - (now - last)
+            return f"mode dwell {int(remaining // 60)}m left"
+        return "switching next pass"
+
+    def status_report(
+        self, now: float, *, shutdown: bool = False
+    ) -> tuple[str, list[str]]:
         """Render the group's status as human-readable lines.
 
         Returns a (signature, lines) pair. The signature excludes temperatures
@@ -516,6 +543,7 @@ class GroupController:
                 activity = "pending on"
             elif mode and self._wants(name, opposite):
                 activity = f"needs {opposite.name}, waiting for mode switch"
+                detail = f" ({self._mode_switch_blocker(name, now)})"
             else:
                 activity = "in range"
 
@@ -697,7 +725,7 @@ class ClimateService:
                              "window start; manual changes are respected")
                 signatures.append("shutdown")
             for controller in controllers:
-                sig, group_lines = controller.status_report(shutdown=shutdown)
+                sig, group_lines = controller.status_report(now, shutdown=shutdown)
                 signatures.append(sig)
                 lines.extend(group_lines)
             signature = "||".join(signatures)
