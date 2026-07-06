@@ -667,9 +667,17 @@ function gapSeconds() {
 
 function render() {
   if (!state.data) return;
-  renderCombined();
-  renderGrid();
-  renderTable();
+  // Hold the page height steady while the DOM is rebuilt: lineChart() forces
+  // layout mid-rebuild while most cards are empty, and a transiently shorter
+  // page clamps the scroll position (a visible jump upward on mobile).
+  document.body.style.minHeight = `${document.body.offsetHeight}px`;
+  try {
+    renderCombined();
+    renderGrid();
+    renderTable();
+  } finally {
+    document.body.style.minHeight = "";
+  }
   $("#subtitle").textContent =
     `Last ${RANGES.find((r) => r.hours === state.hours)?.label ?? state.hours + "h"}` +
     ` · sampled every ${Math.round(state.data.sample_interval)}s`;
@@ -778,8 +786,12 @@ function buildFilters() {
   }
 }
 
-let resizeTimer;
+/* Chart geometry only depends on width, and mobile browsers fire resize when
+   scrolling shows/hides the URL bar (height-only) — ignore those. */
+let resizeTimer, lastWidth = innerWidth;
 addEventListener("resize", () => {
+  if (innerWidth === lastWidth) return;
+  lastWidth = innerWidth;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(render, 150);
 });
