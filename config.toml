@@ -23,7 +23,7 @@ manage_setpoints = true       # also push each unit's setpoint to match the rang
 
 [shutdown]
 enabled = true                # master switch for the windows below
-windows = ["20:00-07:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
+windows = ["20:00-08:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
                               # When a window starts every unit is switched
                               # off once; a unit switched on manually during
                               # the window stays on. Add more windows as extra
