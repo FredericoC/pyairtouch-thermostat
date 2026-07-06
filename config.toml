@@ -11,9 +11,10 @@ log_file = "climate.log"      # service log file (relative to this config file),
                               # rotated at ~1 MB and tailed by the web dashboard.
                               # Set to "" to log to stdout only.
 
+# Note: when heating, the master and bed 2 never quite reach above 22.2/23°C respectively due to thermostat inaccuracies (maybe?)
 [defaults]
-target_low = 23               # heat when a room drops below this
-target_high = 25.5              # cool when a room rises above this
+target_low = 22.6             # heat when a room drops below this
+target_high = 24.8            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
 mode_switch_buffer = 1.0      # a room must exceed the range by this much (and no
@@ -52,10 +53,8 @@ master = "Study"
 members = ["Study", "Living", "Master", "Bed 2"]
 
 # Per-room overrides of any [defaults] temperature value
-# [rooms."Bed 4"]
-# target_low = 23
-# target_high = 25.5
-#
-# [rooms."Master"]
-# target_low = 22.5
-# target_high = 26
+
+# Jeni prefers her room warmer. HRV will even it out eventually though.
+[rooms."Bed 4"]
+target_low = 23
+target_high = 26
