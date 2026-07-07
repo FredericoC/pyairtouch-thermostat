@@ -95,6 +95,17 @@ class Api:
             # Raw newest sample time (not bucketed): the client predicts the
             # next write as latest_ts + sample_interval.
             latest_ts = conn.execute("SELECT MAX(ts) FROM readings").fetchone()[0]
+            # Raw newest sample per unit for the "now" displays (chips, tiles,
+            # table). The bucketed series aggregates MAX(power)/activity, so a
+            # bucket mixing heating-then-off samples reads "heating" — at long
+            # ranges (wide buckets) that shows a unit as running long after it
+            # switched off.
+            latest_rows = conn.execute(
+                # SQLite: bare columns in a MAX(ts) aggregate come from the
+                # row that held the max.
+                "SELECT unit, MAX(ts), temperature, setpoint, power, activity"
+                " FROM readings GROUP BY unit"
+            ).fetchall()
             try:
                 weather = conn.execute(
                     """
@@ -133,6 +144,12 @@ class Api:
             "sample_interval": self._cfg.history_interval,
             "poll_interval": self._cfg.poll_interval,
             "latest_ts": latest_ts,
+            # Same [t, temp, setpoint, power, activity] shape as series points.
+            "latest": {
+                unit: [ts, temp, setpoint, power, activity]
+                for unit, ts, temp, setpoint, power, activity in latest_rows
+                if unit in series
+            },
             "bucket": bucket,
             "series": series,
             "weather": weather,  # [[t, outdoor °C, solar W/m²], ...]

@@ -579,6 +579,13 @@ function latest(points) {
   return null;
 }
 
+/* Current state of a unit for chips/tiles/table: the raw newest sample, not
+   the last downsample bucket — bucketed power/activity is MAX-aggregated, so
+   it reads "heating" for up to a full bucket after the unit switches off. */
+function latestRaw(unit) {
+  return state.data.latest?.[unit] || latest(state.data.series[unit]);
+}
+
 function latestWeather() {
   const weather = state.data.weather || [];
   let temp = null, sunV = null;
@@ -646,7 +653,7 @@ function renderGrid() {
   grid.textContent = "";
   grid.classList.toggle("compact", state.compact);
   for (const unit of state.data.units) {
-    const last = latest(state.data.series[unit]);
+    const last = latestRaw(unit);
     const range = state.data.ranges[unit];
     const card = htmlEl("section", state.compact ? "card tile" : "card");
     if (last && last[3] && (last[4] === "heating" || last[4] === "cooling"))
@@ -723,7 +730,7 @@ function renderTable() {
     thead.appendChild(htmlEl("th", null, h));
   table.appendChild(thead);
   for (const unit of state.data.units) {
-    const p = latest(state.data.series[unit]);
+    const p = latestRaw(unit);
     const tr = htmlEl("tr");
     tr.appendChild(htmlEl("td", null, unit));
     tr.appendChild(htmlEl("td", "num", p ? `${fmtTemp(p[1])} °C` : "–"));
