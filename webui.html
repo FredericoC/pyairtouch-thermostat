@@ -56,6 +56,9 @@
   .sub { color: var(--text-muted); font-size: 12.5px; margin-top: 2px; }
   #next { font-variant-numeric: tabular-nums; }
   #next.stale { color: #e34948; font-weight: 600; }
+  #shutdown { font-variant-numeric: tabular-nums; }
+  #shutdown.active { color: var(--text-primary); font-weight: 600; }
+  .now .status { font-size: 0.7em; font-weight: 400; margin-left: 3px; }
   @media (prefers-color-scheme: dark) { #next.stale { color: #e66767; } }
 
   .filters { display: flex; gap: 6px; align-items: center; margin: 16px 0 14px; flex-wrap: wrap; }
@@ -165,6 +168,7 @@
 
 <h1>AirTouch temperatures</h1>
 <div class="sub"><span id="subtitle">Loading…</span><span id="next"></span></div>
+<div class="sub" id="shutdown" hidden></div>
 
 <div class="filters" id="filters">
   <button id="compactBtn">Compact</button>
@@ -230,6 +234,14 @@ function htmlEl(tag, className, text) {
   return el;
 }
 const fmtTemp = (v) => (v == null ? "–" : v.toFixed(1));
+
+/* Range status: ✅ in range, ⬆️ below range (needs to come up), ⬇️ above. */
+function tempStatusEmoji(temp, range) {
+  if (temp == null || !range) return "";
+  if (temp < range[0]) return "⬆️";
+  if (temp > range[1]) return "⬇️";
+  return "✅";
+}
 
 function fmtTime(ts, step) {
   const d = new Date(ts * 1000);
@@ -647,6 +659,8 @@ function renderGrid() {
       card.appendChild(head);
       const now = htmlEl("div", "now", last ? fmtTemp(last[1]) : "–");
       now.appendChild(htmlEl("span", "deg", " °C"));
+      const status = tempStatusEmoji(last && last[1], range);
+      if (status) now.appendChild(htmlEl("span", "status", status));
       card.appendChild(now);
       const bits = [];
       if (last && last[3] && last[2] != null) bits.push(`set ${last[2].toFixed(1)}°`);
@@ -666,6 +680,8 @@ function renderGrid() {
 
     const now = htmlEl("span", "now", last ? fmtTemp(last[1]) : "–");
     now.appendChild(htmlEl("span", "deg", " °C"));
+    const status = tempStatusEmoji(last && last[1], range);
+    if (status) now.appendChild(htmlEl("span", "status", status));
     head.appendChild(now);
     card.appendChild(head);
 
@@ -730,6 +746,29 @@ function renderTable() {
   }
 }
 
+/* Shutdown windows from the service config ((start, end) minutes past
+   midnight, may cross it). "Active now" is computed with the browser clock —
+   same household as the service, so close enough for display. */
+const fmtHM = (m) =>
+  `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+let shutdownRenderedFor = null;
+function renderShutdown() {
+  const el = $("#shutdown");
+  const windows = state.data?.shutdown_windows || [];
+  if (!windows.length) { el.hidden = true; return; }
+  const now = new Date();
+  const minute = now.getHours() * 60 + now.getMinutes();
+  if (shutdownRenderedFor === minute) return;
+  shutdownRenderedFor = minute;
+  const active = windows.some(([s, e]) =>
+    s < e ? minute >= s && minute < e : minute >= s || minute < e);
+  const spans = windows.map(([s, e]) => `${fmtHM(s)}–${fmtHM(e)}`).join(", ");
+  el.textContent = `Shutdown ${spans} · ` +
+    (active ? "🌙 active now — control paused" : "not active");
+  el.classList.toggle("active", active);
+  el.hidden = false;
+}
+
 function gapSeconds() {
   return Math.max(600, 3 * (state.data.bucket || state.data.sample_interval));
 }
@@ -751,6 +790,8 @@ function render() {
   $("#subtitle").textContent =
     `Last ${RANGES.find((r) => r.hours === state.hours)?.label ?? state.hours + "h"}` +
     ` · sampled every ${Math.round(state.data.sample_interval)}s`;
+  shutdownRenderedFor = null; // fresh data may change the windows
+  renderShutdown();
   tickCountdown();
 }
 
@@ -775,6 +816,7 @@ function tickCountdown() {
     const ago = now - d.latest_ts;
     el.textContent = ` · last sample ${ago >= 90 ? Math.round(ago / 60) + "m" : Math.round(ago) + "s"} ago`;
   }
+  renderShutdown(); // piggyback the 1s tick; re-renders only on minute change
   // Refetch shortly after a sample is due so charts pick it up without waiting
   // for the 60s interval; once per due time, the interval remains the fallback.
   if (late >= 3 && late <= grace && autoFetchedFor !== due) {

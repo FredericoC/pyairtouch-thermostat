@@ -127,6 +127,9 @@ class Api:
                 name: [room.target_low, room.target_high]
                 for name, room in self._cfg.rooms.items()
             },
+            # (start, end) minutes past midnight; the client formats these and
+            # decides "active now" with its own clock (same household/timezone).
+            "shutdown_windows": [list(w) for w in self._cfg.shutdown_windows],
             "sample_interval": self._cfg.history_interval,
             "poll_interval": self._cfg.poll_interval,
             "latest_ts": latest_ts,
