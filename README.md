@@ -88,7 +88,11 @@ The service:
   last switch;
 - avoids compressor short-cycling via `min_power_toggle_minutes` per unit;
 - optionally pushes each unit's setpoint to match the range
-  (`manage_setpoints`);
+  (`manage_setpoints`), overshot by `setpoint_boost` °C past the power-off
+  threshold. The units modulate on their own return-air sensor, which sits in
+  warmer (stratified) air than the room sensor, so without the boost they
+  taper to a trickle before the room actually reaches temperature. Power-off
+  is still decided by the room sensor, so the boost can't overshoot the room;
 - reconnects automatically with backoff if the connection drops.
 
 All tuning lives in [`config.toml`](config.toml), including per-room range

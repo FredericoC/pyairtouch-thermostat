@@ -74,7 +74,11 @@ Mode commands must only be sent to masters, via
 effect. All units — masters included — are powered on/off
 (`ac.set_power(...)`) purely on their own room's demand, and when
 `manage_setpoints` is on each also gets whole-degree setpoint commands
-(`ac.set_target_temperature(...)`, rounded toward the demand side).
+(`ac.set_target_temperature(...)`, rounded toward the demand side and pushed
+`setpoint_boost` °C past the power-off threshold — units modulate on their own
+return-air sensor and taper off before the room sensor reaches target;
+power-off is still decided by the room sensor, so the boost can't overshoot
+the room).
 
 ## Control policy (climate_service.py)
 
