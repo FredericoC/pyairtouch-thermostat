@@ -74,6 +74,7 @@ class Config:
     min_mode_dwell: float  # seconds
     min_power_toggle: float  # seconds
     manage_setpoints: bool
+    setpoint_boost: float  # °C past the off threshold to push unit setpoints
     history_path: Path | None  # None = history recording disabled
     history_interval: float  # seconds
     weather_port: int | None  # None = Ecowitt weather listener disabled
@@ -206,6 +207,7 @@ def load_config(path: Path) -> Config:
         min_mode_dwell=float(defaults.get("min_mode_dwell_minutes", 60)) * 60,
         min_power_toggle=float(defaults.get("min_power_toggle_minutes", 10)) * 60,
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
+        setpoint_boost=float(defaults.get("setpoint_boost", 0.0)),
         history_path=history_path,
         history_interval=float(history.get("interval_seconds", 60)),
         weather_port=weather_port,
@@ -341,11 +343,16 @@ class GroupController:
         # Whole-degree setpoints only (fractional values may not be honoured by
         # the units). Round towards the demand side: up for heat, down for cool,
         # so the unit's internal thermostat can't idle short of our power-off
-        # threshold (target_low/high ± hysteresis).
+        # threshold (target_low/high ± hysteresis). setpoint_boost pushes the
+        # setpoint further past the threshold: the unit modulates on its own
+        # return-air sensor, which reads warm before the room sensor reaches
+        # target, so without the boost it tapers to a trickle short of temp.
+        # We power off on the room sensor, so the boost can't overheat the room.
+        boost = self._cfg.setpoint_boost
         if mode is AcMode.HEAT:
-            target = float(math.ceil(room.target_low + self._cfg.hysteresis))
+            target = float(math.ceil(room.target_low + self._cfg.hysteresis + boost))
         else:
-            target = float(math.floor(room.target_high - self._cfg.hysteresis))
+            target = float(math.floor(room.target_high - self._cfg.hysteresis - boost))
         target = max(unit.min_target_temperature, min(unit.max_target_temperature, target))
         resolution = unit.target_temperature_resolution or 0.5
         current = unit.target_temperature

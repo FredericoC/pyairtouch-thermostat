@@ -20,6 +20,11 @@ hysteresis = 0.4              # keep conditioning this far past the boundary bef
 min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per group
 min_power_toggle_minutes = 15 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range
+setpoint_boost = 1            # °C to overshoot unit setpoints past the off
+                              # threshold. Units modulate on their own return-air
+                              # sensor and taper off before the room reaches temp;
+                              # the boost keeps them working until the room sensor
+                              # (which decides power-off) says stop.
 
 [shutdown]
 enabled = true                # master switch for the windows below
