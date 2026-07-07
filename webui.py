@@ -30,8 +30,17 @@ MAX_LOG_LINES = 2000
 
 # Numeric encoding for the activity column, highest control-priority wins when
 # a downsample bucket mixes values. Decoded back to strings client-side.
-_ACTIVITY_CODE = "CASE activity WHEN 'heating' THEN 3 WHEN 'cooling' THEN 2 WHEN 'on' THEN 1 ELSE 0 END"
-_ACTIVITY_NAMES = {3: "heating", 2: "cooling", 1: "on", 0: None}
+_ACTIVITY_CODE = (
+    "CASE activity"
+    " WHEN 'heating' THEN 5 WHEN 'heating (manual)' THEN 4"
+    " WHEN 'cooling' THEN 3 WHEN 'cooling (manual)' THEN 2"
+    " WHEN 'on' THEN 1 ELSE 0 END"
+)
+_ACTIVITY_NAMES = {
+    5: "heating", 4: "heating (manual)",
+    3: "cooling", 2: "cooling (manual)",
+    1: "on", 0: None,
+}
 
 # Web app manifest so Chrome on Android installs the dashboard as a
 # standalone app ("Add to Home screen"). Chrome only honours standalone

@@ -448,7 +448,7 @@ class GroupController:
             )
         room_state.last_power_change = now
 
-    def history_rows(self) -> list[tuple]:
+    def history_rows(self, *, shutdown: bool = False) -> list[tuple]:
         """One (unit, temperature, setpoint, power, mode, activity) per member."""
         rows = []
         for name in self._group.members:
@@ -457,6 +457,11 @@ class GroupController:
             running_for = self._state.rooms[name].running_for
             if on and running_for:
                 activity = f"{running_for.name.lower()}ing"
+            elif on and shutdown and unit.active_mode in (AcMode.HEAT, AcMode.COOL):
+                # Switched on manually during a shutdown window: the control
+                # policy isn't driving it, but the unit's own mode says what
+                # it's doing. active_mode resolves AUTO to heat/cool.
+                activity = f"{unit.active_mode.name.lower()}ing (manual)"
             elif on:
                 activity = "on"
             else:
@@ -660,12 +665,14 @@ class HistoryRecorder:
         now: float,
         controllers: list["GroupController"],
         weather: tuple[float | None, float | None] | None = None,
+        *,
+        shutdown: bool = False,
     ) -> None:
         if now - self._last_sample < self._interval:
             return
         self._last_sample = now
         ts = int(time.time())
-        rows = [row for c in controllers for row in c.history_rows()]
+        rows = [row for c in controllers for row in c.history_rows(shutdown=shutdown)]
         self._conn.executemany(
             "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(ts, *row) for row in rows],
@@ -797,6 +804,7 @@ class ClimateService:
                 self._history.maybe_record(
                     now, controllers,
                     self._weather.sample(now) if self._weather else None,
+                    shutdown=shutdown,
                 )
 
             signatures, lines = [], []

@@ -364,8 +364,8 @@ function lineChart(container, series, opts) {
     let segStart = null, segKind = null;
     const flush = (tEnd) => {
       if (segStart == null) return;
-      const wash = segKind === "heating" ? "var(--heat-wash)"
-                 : segKind === "cooling" ? "var(--cool-wash)" : "var(--baseline)";
+      const wash = segKind.startsWith("heating") ? "var(--heat-wash)"
+                 : segKind.startsWith("cooling") ? "var(--cool-wash)" : "var(--baseline)";
       svg.appendChild(svgEl("rect", {
         x: x(segStart), y: m.top + ih - 3,
         width: Math.max(1.5, x(tEnd) - x(segStart)), height: 3,
@@ -600,8 +600,9 @@ function statusChip(last) {
   const chip = htmlEl("span", "chip");
   if (last && last[3]) {
     const dot = htmlEl("span", "dot");
-    dot.style.background = last[4] === "heating" ? "var(--heat-wash)"
-      : last[4] === "cooling" ? "var(--cool-wash)" : "var(--baseline)";
+    const kind = last[4] || "";
+    dot.style.background = kind.startsWith("heating") ? "var(--heat-wash)"
+      : kind.startsWith("cooling") ? "var(--cool-wash)" : "var(--baseline)";
     chip.appendChild(dot);
     chip.appendChild(document.createTextNode(last[4] || "on"));
   } else {
@@ -656,8 +657,9 @@ function renderGrid() {
     const last = latestRaw(unit);
     const range = state.data.ranges[unit];
     const card = htmlEl("section", state.compact ? "card tile" : "card");
-    if (last && last[3] && (last[4] === "heating" || last[4] === "cooling"))
-      card.classList.add(last[4]);
+    const runKind = last && last[3] && last[4] ? last[4].split(" ")[0] : null;
+    if (runKind === "heating" || runKind === "cooling")
+      card.classList.add(runKind);
 
     if (state.compact) {
       const head = htmlEl("div", "tile-head");
