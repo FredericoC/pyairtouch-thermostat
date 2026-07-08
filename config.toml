@@ -17,7 +17,7 @@ target_high = 24.8            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
 min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per group
-min_power_toggle_minutes = 15 # minimum time between on/off changes per unit
+min_power_toggle_minutes = 10 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range
 setpoint_boost = 1            # °C to overshoot unit setpoints past the off
                               # threshold. Units modulate on their own return-air
