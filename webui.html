@@ -604,7 +604,12 @@ function statusChip(last) {
     dot.style.background = kind.startsWith("heating") ? "var(--heat-wash)"
       : kind.startsWith("cooling") ? "var(--cool-wash)" : "var(--baseline)";
     chip.appendChild(dot);
-    chip.appendChild(document.createTextNode(last[4] || "on"));
+    // Activity "on" means powered but the control policy no longer wants it
+    // running — the room reached temp and the unit is waiting out
+    // min_power_toggle_minutes. During a shutdown window "on" instead means
+    // switched on manually, and the service leaves it alone.
+    const pendingOff = kind === "on" && !shutdownActiveNow();
+    chip.appendChild(document.createTextNode(pendingOff ? "pending off" : kind || "on"));
   } else {
     chip.classList.add("off");
     chip.textContent = "off";
@@ -685,7 +690,7 @@ function renderGrid() {
     const isMaster = Object.values(state.data.groups).some((g) => g.master === unit);
     if (isMaster) head.appendChild(htmlEl("span", "meta", "master"));
 
-    if (last && last[3]) head.appendChild(statusChip(last));
+    head.appendChild(statusChip(last));
 
     const now = htmlEl("span", "now", last ? fmtTemp(last[1]) : "–");
     now.appendChild(htmlEl("span", "deg", " °C"));
@@ -760,6 +765,12 @@ function renderTable() {
    same household as the service, so close enough for display. */
 const fmtHM = (m) =>
   `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+function shutdownActiveNow() {
+  const now = new Date();
+  const minute = now.getHours() * 60 + now.getMinutes();
+  return (state.data?.shutdown_windows || []).some(([s, e]) =>
+    s < e ? minute >= s && minute < e : minute >= s || minute < e);
+}
 let shutdownRenderedFor = null;
 function renderShutdown() {
   const el = $("#shutdown");
@@ -769,8 +780,7 @@ function renderShutdown() {
   const minute = now.getHours() * 60 + now.getMinutes();
   if (shutdownRenderedFor === minute) return;
   shutdownRenderedFor = minute;
-  const active = windows.some(([s, e]) =>
-    s < e ? minute >= s && minute < e : minute >= s || minute < e);
+  const active = shutdownActiveNow();
   const spans = windows.map(([s, e]) => `${fmtHM(s)}–${fmtHM(e)}`).join(", ");
   el.textContent = `Shutdown ${spans} · ` +
     (active ? "🌙 active now — control paused" : "not active");
