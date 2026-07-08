@@ -67,7 +67,9 @@
     border-radius: 10px; padding: 14px 16px 10px; position: relative;
   }
   .card h2 { font-size: 14px; font-weight: 600; }
+  .card h3 { font-size: 13px; font-weight: 600; margin-top: 18px; }
   .card .meta { color: var(--text-muted); font-size: 12px; }
+  td .meta { font-size: 11.5px; }
   .card-head { display: flex; align-items: baseline; gap: 8px; }
   .card-head .meta { margin-left: auto; font-variant-numeric: tabular-nums; }
   #content.loading .card { opacity: 0.6; transition: opacity .2s; }
@@ -466,6 +468,45 @@ function renderGrid() {
   }
 }
 
+/* Sum runtime over one or more units (a room, or a group's members).
+   Busiest day is by heating + cooling, summed across the units per day. */
+function sumRuntime(units) {
+  const perDay = {};
+  let on = 0, heat = 0, cool = 0, coverage = 0;
+  for (const unit of units) {
+    for (const [day, vals] of Object.entries(state.data.runtime[unit] || {})) {
+      on += vals[0]; heat += vals[1]; cool += vals[2]; coverage += vals[3];
+      perDay[day] = (perDay[day] || 0) + vals[1] + vals[2];
+    }
+  }
+  let busiest = null, busiestSecs = 0;
+  for (const [day, secs] of Object.entries(perDay))
+    if (secs > busiestSecs) { busiest = day; busiestSecs = secs; }
+  return { on, heat, cool, coverage, busiest, busiestSecs };
+}
+
+function totalsTable(firstHeader, rows) {
+  const table = htmlEl("table");
+  const thead = htmlEl("tr");
+  for (const h of [firstHeader, "Heating", "Cooling", "On, idle", "Total on", "On %", "Busiest day"])
+    thead.appendChild(htmlEl("th", null, h));
+  table.appendChild(thead);
+  for (const [labelCell, t] of rows) {
+    const tr = htmlEl("tr");
+    tr.appendChild(labelCell);
+    tr.appendChild(htmlEl("td", "num", fmtDur(t.heat)));
+    tr.appendChild(htmlEl("td", "num", fmtDur(t.cool)));
+    tr.appendChild(htmlEl("td", "num", fmtDur(Math.max(0, t.on - t.heat - t.cool))));
+    tr.appendChild(htmlEl("td", "num", fmtDur(t.on)));
+    tr.appendChild(htmlEl("td", "num",
+      t.coverage ? `${(100 * t.on / t.coverage).toFixed(0)}%` : "–"));
+    tr.appendChild(htmlEl("td", "num",
+      t.busiest ? `${fmtDayFull(t.busiest)} (${fmtDur(t.busiestSecs)})` : "–"));
+    table.appendChild(tr);
+  }
+  return table;
+}
+
 function renderTotals() {
   const card = $("#totalsCard");
   card.textContent = "";
@@ -473,33 +514,20 @@ function renderTotals() {
   card.appendChild(htmlEl("h2", null, "Totals"));
   card.appendChild(htmlEl("div", "meta",
     "On % is the share of recorded time; busiest day by heating + cooling."));
-  const table = htmlEl("table");
-  const thead = htmlEl("tr");
-  for (const h of ["Room", "Heating", "Cooling", "On, idle", "Total on", "On %", "Busiest day"])
-    thead.appendChild(htmlEl("th", null, h));
-  table.appendChild(thead);
 
-  for (const unit of state.data.units) {
-    const days = state.data.runtime[unit] || {};
-    let on = 0, heat = 0, cool = 0, coverage = 0;
-    let busiest = null, busiestSecs = 0;
-    for (const [day, vals] of Object.entries(days)) {
-      on += vals[0]; heat += vals[1]; cool += vals[2]; coverage += vals[3];
-      const conditioning = vals[1] + vals[2];
-      if (conditioning > busiestSecs) { busiest = day; busiestSecs = conditioning; }
-    }
-    const tr = htmlEl("tr");
-    tr.appendChild(htmlEl("td", null, unit));
-    tr.appendChild(htmlEl("td", "num", fmtDur(heat)));
-    tr.appendChild(htmlEl("td", "num", fmtDur(cool)));
-    tr.appendChild(htmlEl("td", "num", fmtDur(Math.max(0, on - heat - cool))));
-    tr.appendChild(htmlEl("td", "num", fmtDur(on)));
-    tr.appendChild(htmlEl("td", "num", coverage ? `${(100 * on / coverage).toFixed(0)}%` : "–"));
-    tr.appendChild(htmlEl("td", "num",
-      busiest ? `${fmtDayFull(busiest)} (${fmtDur(busiestSecs)})` : "–"));
-    table.appendChild(tr);
-  }
-  card.appendChild(table);
+  card.appendChild(totalsTable("Room", state.data.units.map((unit) =>
+    [htmlEl("td", null, unit), sumRuntime([unit])])));
+
+  const groups = Object.entries(state.data.groups || {});
+  if (!groups.length) return;
+  card.appendChild(htmlEl("h3", null, "Per group"));
+  card.appendChild(htmlEl("div", "meta",
+    "Unit-time summed across each group's members (one multi-split outdoor unit per group)."));
+  card.appendChild(totalsTable("Group", groups.map(([name, g]) => {
+    const cell = htmlEl("td", null, name);
+    cell.appendChild(htmlEl("div", "meta", g.members.join(" · ")));
+    return [cell, sumRuntime(g.members)];
+  })));
 }
 
 function render() {

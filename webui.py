@@ -230,6 +230,10 @@ class Api:
                 runtime[unit][day] = [on_s, heat_s, cool_s, coverage]
         return {
             "units": self._units,
+            "groups": {
+                g.name: {"master": g.master, "members": list(g.members)}
+                for g in self._cfg.groups
+            },
             "days": day_list,  # contiguous, oldest first, ends today
             "runtime": runtime,
             "weather": {day: [mean, lo, hi] for day, mean, lo, hi in weather},
