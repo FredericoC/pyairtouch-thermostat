@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirTouch stats</title>
+<link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<style>
+  /* Shared look with webui.html — keep the two blocks in sync by hand. */
+  :root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --band: rgba(225, 224, 217, 0.45);
+    --heat-wash: rgba(227, 73, 72, 0.55);
+    --cool-wash: rgba(42, 120, 214, 0.55);
+    --outside: #52514e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --band: rgba(44, 44, 42, 0.6);
+      --heat-wash: rgba(230, 103, 103, 0.6);
+      --cool-wash: rgba(57, 135, 229, 0.6);
+      --outside: #c3c2b7;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 20px clamp(12px, 3vw, 32px) 48px;
+  }
+  h1 { font-size: 20px; font-weight: 600; }
+  .sub { color: var(--text-muted); font-size: 12.5px; margin-top: 2px; }
+
+  .filters { display: flex; gap: 6px; align-items: center; margin: 16px 0 14px; flex-wrap: wrap; }
+  .filters button {
+    font: inherit; font-size: 13px; color: var(--text-secondary);
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 7px; padding: 5px 12px; cursor: pointer;
+  }
+  .filters button:hover { color: var(--text-primary); }
+  .filters button[aria-pressed="true"] {
+    color: var(--text-primary); font-weight: 600; border-color: var(--baseline);
+  }
+  .filters .spacer { flex: 1; }
+  .filters a { color: var(--text-muted); font-size: 12.5px; }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px 10px; position: relative;
+  }
+  .card h2 { font-size: 14px; font-weight: 600; }
+  .card .meta { color: var(--text-muted); font-size: 12px; }
+  .card-head { display: flex; align-items: baseline; gap: 8px; }
+  .card-head .meta { margin-left: auto; font-variant-numeric: tabular-nums; }
+  #content.loading .card { opacity: 0.6; transition: opacity .2s; }
+
+  #grid {
+    margin-top: 14px;
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  }
+  #outsideCard { margin-top: 14px; }
+  #totalsCard { margin-top: 14px; padding-bottom: 14px; overflow-x: auto; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 0 2px; }
+  .legend .item { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 12.5px; }
+  .legend .box { width: 11px; height: 11px; border-radius: 3px; }
+  .legend .key { width: 16px; height: 0; border-top: 2.5px solid; border-radius: 2px; }
+
+  svg { display: block; }
+  svg text { fill: var(--text-muted); font: 11px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+
+  .tooltip {
+    position: absolute; pointer-events: none; z-index: 5; display: none;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.14); padding: 8px 10px; min-width: 130px;
+  }
+  .tooltip .when { color: var(--text-muted); font-size: 11.5px; margin-bottom: 4px; }
+  .tooltip .row { display: flex; align-items: center; gap: 7px; padding: 1.5px 0; font-size: 12.5px; }
+  .tooltip .box { width: 10px; height: 10px; border-radius: 2.5px; flex: none; }
+  .tooltip .val { font-weight: 600; font-variant-numeric: tabular-nums; margin-left: auto; }
+  .tooltip .name { color: var(--text-secondary); }
+  .tooltip .extra { color: var(--text-muted); font-size: 11.5px; margin-top: 3px; }
+
+  table { border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 18px 5px 0; border-bottom: 1px solid var(--grid); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 12px; }
+  td.num { font-variant-numeric: tabular-nums; }
+
+  .banner {
+    display: none; margin: 0 0 12px; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface-1);
+    color: var(--text-secondary); font-size: 13px;
+  }
+  .empty { color: var(--text-muted); font-size: 12.5px; padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>AirTouch runtime stats</h1>
+<div class="sub" id="subtitle">Loading…</div>
+
+<div class="filters" id="filters">
+  <span class="spacer"></span>
+  <a href="/">← Dashboard</a>
+</div>
+
+<div class="banner" id="banner"></div>
+
+<div id="content">
+  <div class="legend" id="legend" hidden>
+    <span class="item"><span class="box" style="background: var(--heat-wash)"></span>Heating</span>
+    <span class="item"><span class="box" style="background: var(--cool-wash)"></span>Cooling</span>
+    <span class="item"><span class="box" style="background: var(--baseline)"></span>On, idle</span>
+    <span class="item" id="legendOutside" hidden><span class="key" style="border-top-color: var(--outside)"></span>Outside (daily mean, min–max band)</span>
+  </div>
+  <section class="card" id="outsideCard" hidden></section>
+  <div id="grid"></div>
+  <section class="card" id="totalsCard" hidden></section>
+</div>
+
+<script>
+"use strict";
+
+const RANGES = [
+  { label: "7d", days: 7 },
+  { label: "14d", days: 14 },
+  { label: "30d", days: 30 },
+  { label: "90d", days: 90 },
+];
+
+const darkMedia = matchMedia("(prefers-color-scheme: dark)");
+const state = { days: 14, data: null };
+
+const $ = (sel) => document.querySelector(sel);
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  return el;
+}
+function htmlEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+const dayDate = (day) => new Date(day + "T00:00:00"); // local midnight
+const fmtDay = (day) =>
+  dayDate(day).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const fmtDayFull = (day) =>
+  dayDate(day).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+
+function fmtDur(seconds) {
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+/* Seconds the recorder could have covered on a day: a full day, except today
+   which only runs up to now. Used to flag days with partial data. */
+function expectedCoverage(day) {
+  const start = dayDate(day).getTime() / 1000;
+  const now = Date.now() / 1000;
+  return Math.max(0, Math.min(86400, now - start));
+}
+
+/* Label roughly every n/8 days, anchored on the newest so today is labelled. */
+function dayTickIdx(n) {
+  const k = Math.max(1, Math.ceil(n / 8));
+  const idx = [];
+  for (let i = n - 1; i >= 0; i -= k) idx.push(i);
+  return idx.reverse();
+}
+
+function hourTicks(maxH) {
+  for (const step of [0.5, 1, 2, 4, 6, 12, 24]) {
+    const n = Math.floor(maxH / step);
+    if (n <= 5) return Array.from({ length: n }, (_, i) => (i + 1) * step);
+  }
+  return [];
+}
+
+function tempTicks(lo, hi) {
+  for (const step of [0.5, 1, 2, 5, 10]) {
+    const first = Math.ceil(lo / step) * step;
+    const n = Math.floor((hi - first) / step) + 1;
+    if (n <= 6) {
+      return Array.from({ length: n }, (_, i) => +(first + i * step).toFixed(1));
+    }
+  }
+  return [];
+}
+
+/* Shared chart scaffolding: margins, day slots on x, baseline, day ticks.
+   Returns null when the container is too narrow to draw. */
+function dayAxis(container, height) {
+  const width = container.clientWidth - 32; // card padding
+  const m = { top: 10, right: 12, bottom: 22, left: 36 };
+  const iw = width - m.left - m.right, ih = height - m.top - m.bottom;
+  if (iw <= 40) return null;
+  const days = state.data.days;
+  const slot = iw / days.length;
+  const svg = svgEl("svg", { width, height, role: "img" });
+  svg.appendChild(svgEl("line", {
+    x1: m.left, x2: m.left + iw, y1: m.top + ih, y2: m.top + ih,
+    stroke: "var(--baseline)", "stroke-width": 1,
+  }));
+  for (const i of dayTickIdx(days.length)) {
+    const cx = m.left + (i + 0.5) * slot;
+    svg.appendChild(svgEl("line", {
+      x1: cx, x2: cx, y1: m.top + ih, y2: m.top + ih + 4,
+      stroke: "var(--baseline)", "stroke-width": 1,
+    }));
+    const label = svgEl("text", { x: cx, y: m.top + ih + 15, "text-anchor": "middle" });
+    label.textContent = fmtDay(days[i]);
+    svg.appendChild(label);
+  }
+  return {
+    svg, m, iw, ih, slot, days,
+    center: (i) => m.left + (i + 0.5) * slot,
+  };
+}
+
+/* Crosshair-style hover over day slots, with the shared tooltip layout. */
+function dayHover(container, ax, buildRows) {
+  const tooltip = htmlEl("div", "tooltip");
+  container.appendChild(tooltip);
+  const hover = svgEl("rect", {
+    x: ax.m.left, y: ax.m.top, width: ax.iw, height: ax.ih, fill: "transparent",
+  });
+  const marker = svgEl("rect", {
+    y: ax.m.top, height: ax.ih, width: ax.slot, fill: "var(--band)", visibility: "hidden",
+  });
+  ax.svg.insertBefore(marker, ax.svg.firstChild);
+  ax.svg.appendChild(hover);
+
+  hover.addEventListener("pointermove", (e) => {
+    const rect = ax.svg.getBoundingClientRect();
+    const i = Math.max(0, Math.min(ax.days.length - 1,
+      Math.floor((e.clientX - rect.left - ax.m.left) / ax.slot)));
+    const rows = buildRows(i);
+    if (!rows) { hide(); return; }
+    marker.setAttribute("x", ax.m.left + i * ax.slot);
+    marker.setAttribute("visibility", "visible");
+    tooltip.textContent = "";
+    tooltip.appendChild(htmlEl("div", "when", fmtDayFull(ax.days[i])));
+    for (const r of rows) tooltip.appendChild(r);
+    tooltip.style.display = "block";
+    const cardRect = container.getBoundingClientRect();
+    const px = ax.center(i) + 14;
+    const flip = px + tooltip.offsetWidth + 20 > cardRect.width;
+    tooltip.style.left = `${flip ? ax.center(i) - tooltip.offsetWidth - 12 : px}px`;
+    tooltip.style.top = "18px";
+  });
+  const hide = () => {
+    marker.setAttribute("visibility", "hidden");
+    tooltip.style.display = "none";
+  };
+  hover.addEventListener("pointerleave", hide);
+}
+
+function tooltipRow(color, name, value) {
+  const row = htmlEl("div", "row");
+  if (color) {
+    const box = htmlEl("span", "box");
+    box.style.background = color;
+    row.appendChild(box);
+  }
+  row.appendChild(htmlEl("span", "name", name));
+  row.appendChild(htmlEl("span", "val", value));
+  return row;
+}
+
+/* Stacked daily runtime bars for one unit: heating + cooling + idle-on. */
+function runtimeChart(container, unit, yMaxH) {
+  const ax = dayAxis(container, 150);
+  if (!ax) return;
+  const rt = state.data.runtime[unit] || {};
+  const y = (h) => ax.m.top + (1 - h / yMaxH) * ax.ih;
+
+  for (const v of hourTicks(yMaxH)) {
+    ax.svg.appendChild(svgEl("line", {
+      x1: ax.m.left, x2: ax.m.left + ax.iw, y1: y(v), y2: y(v),
+      stroke: "var(--grid)", "stroke-width": 1,
+    }));
+    const label = svgEl("text", { x: ax.m.left - 6, y: y(v) + 3.5, "text-anchor": "end" });
+    label.textContent = `${v}h`;
+    ax.svg.appendChild(label);
+  }
+
+  const barW = Math.max(2, Math.min(ax.slot - 3, ax.slot * 0.72));
+  for (let i = 0; i < ax.days.length; i++) {
+    const vals = rt[ax.days[i]];
+    if (!vals) continue;
+    const [on, heat, cool] = vals;
+    const idle = Math.max(0, on - heat - cool);
+    let acc = 0;
+    for (const [secs, fill] of [
+      [heat, "var(--heat-wash)"], [cool, "var(--cool-wash)"], [idle, "var(--baseline)"],
+    ]) {
+      if (secs <= 0) continue;
+      const h0 = acc / 3600, h1 = (acc + secs) / 3600;
+      ax.svg.appendChild(svgEl("rect", {
+        x: ax.center(i) - barW / 2, y: y(h1),
+        width: barW, height: Math.max(1, y(h0) - y(h1)),
+        fill,
+      }));
+      acc += secs;
+    }
+  }
+
+  dayHover(container, ax, (i) => {
+    const day = ax.days[i];
+    const vals = rt[day];
+    if (!vals) return [tooltipRow(null, "no data", "")];
+    const [on, heat, cool, coverage] = vals;
+    const rows = [
+      tooltipRow("var(--heat-wash)", "heating", fmtDur(heat)),
+      tooltipRow("var(--cool-wash)", "cooling", fmtDur(cool)),
+      tooltipRow("var(--baseline)", "on, idle", fmtDur(Math.max(0, on - heat - cool))),
+      tooltipRow(null, "total on", fmtDur(on)),
+    ];
+    const w = state.data.weather[day];
+    if (w) rows.push(tooltipRow(null, "outside avg", `${w[0].toFixed(1)}°`));
+    if (coverage < 0.9 * expectedCoverage(day))
+      rows.push(htmlEl("div", "extra", `partial data: ${fmtDur(coverage)} recorded`));
+    return rows;
+  });
+
+  container.appendChild(ax.svg);
+}
+
+/* Daily outdoor mean line with a min–max band, on the same day slots. */
+function outsideChart(container) {
+  const ax = dayAxis(container, 140);
+  if (!ax) return;
+  const weather = state.data.weather;
+
+  let vLo = Infinity, vHi = -Infinity;
+  for (const day of ax.days) {
+    const w = weather[day];
+    if (!w) continue;
+    vLo = Math.min(vLo, w[1]);
+    vHi = Math.max(vHi, w[2]);
+  }
+  if (!isFinite(vLo)) {
+    container.appendChild(htmlEl("div", "empty", "No weather data yet in this range"));
+    return;
+  }
+  vLo = Math.floor(vLo - 0.5);
+  vHi = Math.ceil(vHi + 0.5);
+  const y = (v) => ax.m.top + (1 - (v - vLo) / (vHi - vLo)) * ax.ih;
+
+  for (const v of tempTicks(vLo, vHi)) {
+    ax.svg.appendChild(svgEl("line", {
+      x1: ax.m.left, x2: ax.m.left + ax.iw, y1: y(v), y2: y(v),
+      stroke: "var(--grid)", "stroke-width": 1,
+    }));
+    const label = svgEl("text", { x: ax.m.left - 6, y: y(v) + 3.5, "text-anchor": "end" });
+    label.textContent = v.toFixed(1);
+    ax.svg.appendChild(label);
+  }
+
+  // Split into runs of consecutive days with data so gaps break the line.
+  const segments = [];
+  let seg = [];
+  ax.days.forEach((day, i) => {
+    if (weather[day]) seg.push([i, ...weather[day]]);
+    else if (seg.length) { segments.push(seg); seg = []; }
+  });
+  if (seg.length) segments.push(seg);
+
+  for (const s of segments) {
+    if (s.length === 1) {
+      const [i, mean, lo, hi] = s[0];
+      ax.svg.appendChild(svgEl("line", {
+        x1: ax.center(i), x2: ax.center(i), y1: y(lo), y2: y(hi),
+        stroke: "var(--band)", "stroke-width": 6, "stroke-linecap": "round",
+      }));
+      ax.svg.appendChild(svgEl("circle", {
+        cx: ax.center(i), cy: y(mean), r: 3, fill: "var(--outside)",
+      }));
+      continue;
+    }
+    const pt = (i, v) => `${ax.center(i).toFixed(1)},${y(v).toFixed(1)}`;
+    const band = "M" + s.map(([i, , , hi]) => pt(i, hi)).join("L")
+      + "L" + [...s].reverse().map(([i, , lo]) => pt(i, lo)).join("L") + "Z";
+    ax.svg.appendChild(svgEl("path", { d: band, fill: "var(--band)" }));
+    ax.svg.appendChild(svgEl("path", {
+      d: "M" + s.map(([i, mean]) => pt(i, mean)).join("L"),
+      fill: "none", stroke: "var(--outside)", "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+  }
+
+  dayHover(container, ax, (i) => {
+    const w = weather[ax.days[i]];
+    if (!w) return [tooltipRow(null, "no data", "")];
+    return [
+      tooltipRow("var(--outside)", "mean", `${w[0].toFixed(1)}°`),
+      tooltipRow(null, "min–max", `${w[1].toFixed(1)}–${w[2].toFixed(1)}°`),
+    ];
+  });
+
+  container.appendChild(ax.svg);
+}
+
+function renderOutside() {
+  const card = $("#outsideCard");
+  card.textContent = "";
+  const hasWeather = Object.keys(state.data.weather).length > 0;
+  $("#legendOutside").hidden = !hasWeather;
+  card.hidden = !hasWeather;
+  if (!hasWeather) return;
+  const head = htmlEl("div", "card-head");
+  head.appendChild(htmlEl("h2", null, "Outside"));
+  head.appendChild(htmlEl("span", "meta", "daily mean · min–max band, °C"));
+  card.appendChild(head);
+  outsideChart(card);
+}
+
+function renderGrid() {
+  const grid = $("#grid");
+  grid.textContent = "";
+  const d = state.data;
+
+  // Shared y-scale so rooms are directly comparable.
+  let maxOn = 0;
+  for (const unit of d.units)
+    for (const vals of Object.values(d.runtime[unit] || {}))
+      maxOn = Math.max(maxOn, vals[0]);
+  const yMaxH = Math.max(1, Math.ceil(maxOn / 3600));
+
+  for (const unit of d.units) {
+    const card = htmlEl("section", "card");
+    const days = d.runtime[unit] || {};
+    let heat = 0, cool = 0;
+    for (const vals of Object.values(days)) { heat += vals[1]; cool += vals[2]; }
+    const head = htmlEl("div", "card-head");
+    head.appendChild(htmlEl("h2", null, unit));
+    head.appendChild(htmlEl("span", "meta",
+      `heat ${fmtDur(heat)} · cool ${fmtDur(cool)}`));
+    card.appendChild(head);
+    grid.appendChild(card);
+    runtimeChart(card, unit, yMaxH);
+  }
+}
+
+function renderTotals() {
+  const card = $("#totalsCard");
+  card.textContent = "";
+  card.hidden = false;
+  card.appendChild(htmlEl("h2", null, "Totals"));
+  card.appendChild(htmlEl("div", "meta",
+    "On % is the share of recorded time; busiest day by heating + cooling."));
+  const table = htmlEl("table");
+  const thead = htmlEl("tr");
+  for (const h of ["Room", "Heating", "Cooling", "On, idle", "Total on", "On %", "Busiest day"])
+    thead.appendChild(htmlEl("th", null, h));
+  table.appendChild(thead);
+
+  for (const unit of state.data.units) {
+    const days = state.data.runtime[unit] || {};
+    let on = 0, heat = 0, cool = 0, coverage = 0;
+    let busiest = null, busiestSecs = 0;
+    for (const [day, vals] of Object.entries(days)) {
+      on += vals[0]; heat += vals[1]; cool += vals[2]; coverage += vals[3];
+      const conditioning = vals[1] + vals[2];
+      if (conditioning > busiestSecs) { busiest = day; busiestSecs = conditioning; }
+    }
+    const tr = htmlEl("tr");
+    tr.appendChild(htmlEl("td", null, unit));
+    tr.appendChild(htmlEl("td", "num", fmtDur(heat)));
+    tr.appendChild(htmlEl("td", "num", fmtDur(cool)));
+    tr.appendChild(htmlEl("td", "num", fmtDur(Math.max(0, on - heat - cool))));
+    tr.appendChild(htmlEl("td", "num", fmtDur(on)));
+    tr.appendChild(htmlEl("td", "num", coverage ? `${(100 * on / coverage).toFixed(0)}%` : "–"));
+    tr.appendChild(htmlEl("td", "num",
+      busiest ? `${fmtDayFull(busiest)} (${fmtDur(busiestSecs)})` : "–"));
+    table.appendChild(tr);
+  }
+  card.appendChild(table);
+}
+
+function render() {
+  if (!state.data) return;
+  $("#legend").hidden = false;
+  renderOutside();
+  renderGrid();
+  renderTotals();
+  const days = state.data.days;
+  $("#subtitle").textContent =
+    `${fmtDay(days[0])} – ${fmtDay(days[days.length - 1])}` +
+    ` · daily runtime per room, capped-gap sum of ${Math.round(state.data.sample_interval)}s samples`;
+}
+
+async function refresh() {
+  $("#content").classList.add("loading");
+  try {
+    const res = await fetch(`/api/stats?days=${state.days}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.data = await res.json();
+    $("#banner").style.display = "none";
+    render();
+  } catch (err) {
+    const banner = $("#banner");
+    banner.textContent = `Could not load stats (${err.message}). Retrying…`;
+    banner.style.display = "block";
+  } finally {
+    $("#content").classList.remove("loading");
+  }
+}
+
+function buildFilters() {
+  const filters = $("#filters");
+  for (const r of [...RANGES].reverse()) {
+    const btn = htmlEl("button", "range", r.label);
+    btn.setAttribute("aria-pressed", String(r.days === state.days));
+    btn.addEventListener("click", () => {
+      state.days = r.days;
+      for (const b of filters.querySelectorAll("button"))
+        b.setAttribute("aria-pressed", String(b === btn));
+      refresh();
+    });
+    filters.prepend(btn);
+  }
+}
+
+let resizeTimer, lastWidth = innerWidth;
+addEventListener("resize", () => {
+  if (innerWidth === lastWidth) return;
+  lastWidth = innerWidth;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(render, 150);
+});
+darkMedia.addEventListener("change", render);
+
+buildFilters();
+refresh();
+setInterval(refresh, 300_000); // daily aggregates: a slow refresh is plenty
+</script>
+</body>
+</html>

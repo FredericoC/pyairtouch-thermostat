@@ -16,6 +16,7 @@ import logging
 import sqlite3
 import sys
 from contextlib import closing
+from datetime import date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +28,7 @@ _LOGGER = logging.getLogger("webui")
 MAX_POINTS_PER_UNIT = 700  # downsample beyond this to keep payloads light
 MAX_HOURS = 24 * 90
 MAX_LOG_LINES = 2000
+MAX_STAT_DAYS = 366
 
 # Numeric encoding for the activity column, highest control-priority wins when
 # a downsample bucket mixes values. Decoded back to strings client-side.
@@ -164,6 +166,76 @@ class Api:
             "weather": weather,  # [[t, outdoor °C, solar W/m²], ...]
         }
 
+    def stats(self, days: int) -> dict:
+        """Per-day, per-unit runtime aggregates for the stats page.
+
+        Each sample is taken to represent the unit's state until the next
+        sample, so runtime is the sum of those gaps while the unit was on —
+        with each gap capped at twice the sample interval so periods where
+        the service wasn't recording don't count as runtime. Days are local
+        time (the `readings.ts` column is UTC epoch).
+        """
+        today = date.today()
+        day_list = [
+            (today - timedelta(days=i)).isoformat()
+            for i in range(days - 1, -1, -1)
+        ]
+        start_ts = int(
+            datetime.combine(today - timedelta(days=days - 1), time.min).timestamp()
+        )
+        cap = int(2 * self._cfg.history_interval)
+        dur = "MIN(COALESCE(dur, 0), :cap)"  # capped seconds until next sample
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                WITH samples AS (
+                    SELECT ts, unit, power, activity,
+                           LEAD(ts) OVER (PARTITION BY unit ORDER BY ts) - ts AS dur
+                    FROM readings
+                    WHERE ts >= :start
+                )
+                SELECT date(ts, 'unixepoch', 'localtime') AS day,
+                       unit,
+                       SUM(CASE WHEN power THEN {dur} ELSE 0 END),
+                       SUM(CASE WHEN activity IN ('heating', 'heating (manual)')
+                                THEN {dur} ELSE 0 END),
+                       SUM(CASE WHEN activity IN ('cooling', 'cooling (manual)')
+                                THEN {dur} ELSE 0 END),
+                       SUM({dur})
+                FROM samples
+                GROUP BY day, unit
+                """,
+                {"start": start_ts, "cap": cap},
+            ).fetchall()
+            try:
+                weather = conn.execute(
+                    """
+                    SELECT date(ts, 'unixepoch', 'localtime') AS day,
+                           ROUND(AVG(outdoor_temp), 1),
+                           ROUND(MIN(outdoor_temp), 1),
+                           ROUND(MAX(outdoor_temp), 1)
+                    FROM weather
+                    WHERE ts >= :start AND outdoor_temp IS NOT NULL
+                    GROUP BY day
+                    """,
+                    {"start": start_ts},
+                ).fetchall()
+            except sqlite3.OperationalError:
+                weather = []  # database predates the weather table
+
+        runtime: dict[str, dict[str, list]] = {unit: {} for unit in self._units}
+        for day, unit, on_s, heat_s, cool_s, coverage in rows:
+            if unit in runtime:
+                # [on, heating, cooling, recorded] seconds for that local day.
+                runtime[unit][day] = [on_s, heat_s, cool_s, coverage]
+        return {
+            "units": self._units,
+            "days": day_list,  # contiguous, oldest first, ends today
+            "runtime": runtime,
+            "weather": {day: [mean, lo, hi] for day, mean, lo, hi in weather},
+            "sample_interval": self._cfg.history_interval,
+        }
+
     def csv(self, hours: float) -> str:
         with closing(self._connect()) as conn:
             rows = conn.execute(
@@ -218,8 +290,15 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/":
                 # Read per request so page tweaks don't need a restart.
                 self._respond(200, "text/html; charset=utf-8", html_path.read_bytes())
+            elif parsed.path == "/stats":
+                stats_path = html_path.with_name("stats.html")
+                self._respond(200, "text/html; charset=utf-8", stats_path.read_bytes())
             elif parsed.path == "/api/data":
                 body = json.dumps(api.data(hours)).encode()
+                self._respond(200, "application/json", body)
+            elif parsed.path == "/api/stats":
+                days = min(MAX_STAT_DAYS, max(1, int(query.get("days", ["14"])[0])))
+                body = json.dumps(api.stats(days)).encode()
                 self._respond(200, "application/json", body)
             elif parsed.path == "/api/readings.csv":
                 self._respond(200, "text/csv", api.csv(hours).encode())
