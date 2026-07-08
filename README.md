@@ -86,7 +86,10 @@ The service:
   still demands the current mode, at least one room is `mode_switch_buffer`
   degrees past its range, and `min_mode_dwell_minutes` has elapsed since the
   last switch;
-- avoids compressor short-cycling via `min_power_toggle_minutes` per unit;
+- avoids compressor short-cycling via `min_power_toggle_minutes` per unit.
+  While that hold keeps a satisfied unit on ("pending off"), its setpoint is
+  parked at the room temperature so it idles instead of pumping more heat/cool
+  into the room; the normal setpoint is restored when it next runs;
 - optionally pushes each unit's setpoint to match the range
   (`manage_setpoints`), overshot by `setpoint_boost` °C past the power-off
   threshold. The units modulate on their own return-air sensor, which sits in

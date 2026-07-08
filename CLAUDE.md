@@ -84,7 +84,11 @@ the room).
 
 Per-room on/off thermostat with hysteresis, plus sticky group mode selection:
 a group flips heat<->cool only when no room demands the current mode, a room
-demands the opposite mode, and `min_mode_dwell_minutes` has passed. Per-unit `min_power_toggle_minutes` prevents compressor short-cycling.
+demands the opposite mode, and `min_mode_dwell_minutes` has passed. Per-unit
+`min_power_toggle_minutes` prevents compressor short-cycling; while that hold
+keeps a satisfied unit on ("pending off"), its setpoint is parked at the room
+temperature (floor for heat, ceil for cool) so it idles instead of continuing
+to condition the room — the boosted setpoint returns on the next run.
 All thresholds live in `config.toml`. Temperatures can be `None` — handle that
 when reading `current_temperature`.
 

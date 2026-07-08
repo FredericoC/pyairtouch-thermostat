@@ -353,6 +353,23 @@ class GroupController:
             target = float(math.ceil(room.target_low + self._cfg.hysteresis + boost))
         else:
             target = float(math.floor(room.target_high - self._cfg.hysteresis - boost))
+        await self._send_setpoint(name, target)
+
+    async def _apply_idle_setpoint(self, name: str, mode: AcMode, temp: float) -> None:
+        # The room is satisfied but min_power_toggle_minutes is holding the
+        # unit on. Park the setpoint at the room temperature — rounded down
+        # for heat, up for cool — so the unit's own thermostat idles instead
+        # of pushing more heat/cool into an already-satisfied room. The normal
+        # boosted setpoint is restored on the next power-on (or if demand
+        # returns while the unit is still on).
+        if mode is AcMode.HEAT:
+            target = float(math.floor(temp))
+        else:
+            target = float(math.ceil(temp))
+        await self._send_setpoint(name, target, note=" (idling out power-toggle hold)")
+
+    async def _send_setpoint(self, name: str, target: float, note: str = "") -> None:
+        unit = self._units[name]
         target = max(unit.min_target_temperature, min(unit.max_target_temperature, target))
         resolution = unit.target_temperature_resolution or 0.5
         current = unit.target_temperature
@@ -360,7 +377,7 @@ class GroupController:
             return
         current_s = f"{current:.1f}°C" if current is not None else "?"
         await self._send(
-            f"[{self._group.name}] {name}: setpoint {current_s} → {target:.1f}°C",
+            f"[{self._group.name}] {name}: setpoint {current_s} → {target:.1f}°C{note}",
             unit.set_target_temperature(target),
         )
 
@@ -425,7 +442,11 @@ class GroupController:
             room_state.last_power_change is not None
             and now - room_state.last_power_change < self._cfg.min_power_toggle
         ):
-            return  # anti short-cycling: too soon since the last toggle
+            # Anti short-cycling: too soon since the last toggle. If the unit
+            # is pending off, stop it heating/cooling the room in the meantime.
+            if is_on and self._cfg.manage_setpoints:
+                await self._apply_idle_setpoint(name, mode, temp)
+            return
 
         room = self._cfg.room(name)
         if should_run:
