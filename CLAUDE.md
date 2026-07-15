@@ -75,9 +75,12 @@ for their group (multi-split outdoor-unit constraint):
 - **MPR** (master) → Bed 3, Bed 4
 - **Study** (master) → Living, Master, Bed 2
 
-Mode commands must only be sent to masters, via
+Group mode is driven by the masters, via
 `ac.set_mode(mode, power_on=False)` so the master is not switched on as a side
-effect. All units — masters included — are powered on/off
+effect; member units also get their mode aligned to the master's (same
+`power_on=False` call) just before a setpoint command, because setpoints apply
+to whatever mode the unit has selected. All units — masters included — are
+powered on/off
 (`ac.set_power(...)`) purely on their own room's demand, and when
 `manage_setpoints` is on each also gets whole-degree setpoint commands
 (`ac.set_target_temperature(...)`, rounded toward the demand side and pushed

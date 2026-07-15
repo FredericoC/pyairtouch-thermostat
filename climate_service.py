@@ -2,9 +2,10 @@
 
 Keeps every room inside a configured temperature range by turning individual
 AC units on and off. Two units (the group "masters") dictate whether their
-group heats or cools: mode commands are sent only to the masters — without
-powering them on — and all units (masters included) are powered on/off purely
-on their own room's demand.
+group heats or cools: the masters get mode commands every pass — without
+powering them on — and member units are aligned to the master's mode before
+any setpoint command (setpoints apply to the unit's selected mode). All units
+(masters included) are powered on/off purely on their own room's demand.
 
 Heat/cool mode switching is deliberately sticky: a group only flips mode when
 no room still demands the current mode, at least one room demands the opposite
@@ -353,6 +354,7 @@ class GroupController:
             target = float(math.ceil(room.target_low + self._cfg.hysteresis + boost))
         else:
             target = float(math.floor(room.target_high - self._cfg.hysteresis - boost))
+        await self._align_mode(name, mode)
         await self._send_setpoint(name, target)
 
     async def _apply_idle_setpoint(self, name: str, mode: AcMode, temp: float) -> None:
@@ -366,7 +368,25 @@ class GroupController:
             target = float(math.floor(temp))
         else:
             target = float(math.ceil(temp))
+        await self._align_mode(name, mode)
         await self._send_setpoint(name, target, note=" (idling out power-toggle hold)")
+
+    async def _align_mode(self, name: str, mode: AcMode) -> None:
+        # Setpoint commands apply to the unit's currently-selected mode, so a
+        # member left in another mode (e.g. by the wall panel) would take our
+        # setpoint on the wrong mode's target. Match it to the master's mode
+        # first, never powering it on. The master itself is handled in tick(),
+        # where its mode drives the whole group.
+        if name == self._group.master:
+            return
+        unit = self._units[name]
+        if unit.selected_mode is not mode:
+            await self._send(
+                f"[{self._group.name}] {name}: mode "
+                f"{unit.selected_mode.name if unit.selected_mode else '?'} "
+                f"→ {mode.name} (matching master)",
+                unit.set_mode(mode, power_on=False),
+            )
 
     async def _send_setpoint(self, name: str, target: float, note: str = "") -> None:
         unit = self._units[name]
