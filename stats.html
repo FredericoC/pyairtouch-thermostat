@@ -132,7 +132,7 @@
     <span class="item"><span class="box" style="background: var(--heat-wash)"></span>Heating</span>
     <span class="item"><span class="box" style="background: var(--cool-wash)"></span>Cooling</span>
     <span class="item"><span class="box" style="background: var(--baseline)"></span>On, idle</span>
-    <span class="item" id="legendOutside" hidden><span class="key" style="border-top-color: var(--outside)"></span>Outside (daily mean, min–max band)</span>
+    <span class="item" id="legendOutside" hidden><span class="key" style="border-top-color: var(--outside)"></span>Outside (mean, min–max band)</span>
   </div>
   <section class="card" id="outsideCard" hidden></section>
   <div id="grid"></div>
@@ -143,14 +143,15 @@
 "use strict";
 
 const RANGES = [
-  { label: "7d", days: 7 },
-  { label: "14d", days: 14 },
-  { label: "30d", days: 30 },
-  { label: "90d", days: 90 },
+  { label: "24h", query: "hours=24" },
+  { label: "7d", query: "days=7" },
+  { label: "14d", query: "days=14" },
+  { label: "30d", query: "days=30" },
+  { label: "90d", query: "days=90" },
 ];
 
 const darkMedia = matchMedia("(prefers-color-scheme: dark)");
-const state = { days: 14, data: null };
+const state = { query: "days=14", data: null };
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -166,11 +167,16 @@ function htmlEl(tag, className, text) {
   return el;
 }
 
-const dayDate = (day) => new Date(day + "T00:00:00"); // local midnight
-const fmtDay = (day) =>
-  dayDate(day).toLocaleDateString(undefined, { day: "numeric", month: "short" });
-const fmtDayFull = (day) =>
-  dayDate(day).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+/* Bucket keys are local days ("YYYY-MM-DD") or, in the 24h view, local
+   hours ("YYYY-MM-DDTHH:00"). Both parse as local time. */
+const hourly = () => state.data.bucket_seconds < 86400;
+const bucketDate = (b) => new Date(b.length > 10 ? b : b + "T00:00:00");
+const fmtBucket = (b) => hourly()
+  ? bucketDate(b).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+  : bucketDate(b).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const fmtBucketFull = (b) => hourly()
+  ? bucketDate(b).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+  : bucketDate(b).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
 
 function fmtDur(seconds) {
   const m = Math.round(seconds / 60);
@@ -178,16 +184,16 @@ function fmtDur(seconds) {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
-/* Seconds the recorder could have covered on a day: a full day, except today
-   which only runs up to now. Used to flag days with partial data. */
-function expectedCoverage(day) {
-  const start = dayDate(day).getTime() / 1000;
+/* Seconds the recorder could have covered in a bucket: the full bucket,
+   except the newest which only runs up to now. Flags partial data. */
+function expectedCoverage(bucket) {
+  const start = bucketDate(bucket).getTime() / 1000;
   const now = Date.now() / 1000;
-  return Math.max(0, Math.min(86400, now - start));
+  return Math.max(0, Math.min(state.data.bucket_seconds, now - start));
 }
 
-/* Label roughly every n/8 days, anchored on the newest so today is labelled. */
-function dayTickIdx(n) {
+/* Label roughly every n/8 buckets, anchored on the newest so it is labelled. */
+function tickIdx(n) {
   const k = Math.max(1, Math.ceil(n / 8));
   const idx = [];
   for (let i = n - 1; i >= 0; i -= k) idx.push(i);
@@ -213,38 +219,38 @@ function tempTicks(lo, hi) {
   return [];
 }
 
-/* Shared chart scaffolding: margins, day slots on x, baseline, day ticks.
+/* Shared chart scaffolding: margins, bucket slots on x, baseline, ticks.
    Returns null when the container is too narrow to draw. */
-function dayAxis(container, height) {
+function bucketAxis(container, height) {
   const width = container.clientWidth - 32; // card padding
   const m = { top: 10, right: 12, bottom: 22, left: 36 };
   const iw = width - m.left - m.right, ih = height - m.top - m.bottom;
   if (iw <= 40) return null;
-  const days = state.data.days;
-  const slot = iw / days.length;
+  const buckets = state.data.buckets;
+  const slot = iw / buckets.length;
   const svg = svgEl("svg", { width, height, role: "img" });
   svg.appendChild(svgEl("line", {
     x1: m.left, x2: m.left + iw, y1: m.top + ih, y2: m.top + ih,
     stroke: "var(--baseline)", "stroke-width": 1,
   }));
-  for (const i of dayTickIdx(days.length)) {
+  for (const i of tickIdx(buckets.length)) {
     const cx = m.left + (i + 0.5) * slot;
     svg.appendChild(svgEl("line", {
       x1: cx, x2: cx, y1: m.top + ih, y2: m.top + ih + 4,
       stroke: "var(--baseline)", "stroke-width": 1,
     }));
     const label = svgEl("text", { x: cx, y: m.top + ih + 15, "text-anchor": "middle" });
-    label.textContent = fmtDay(days[i]);
+    label.textContent = fmtBucket(buckets[i]);
     svg.appendChild(label);
   }
   return {
-    svg, m, iw, ih, slot, days,
+    svg, m, iw, ih, slot, buckets,
     center: (i) => m.left + (i + 0.5) * slot,
   };
 }
 
-/* Crosshair-style hover over day slots, with the shared tooltip layout. */
-function dayHover(container, ax, buildRows) {
+/* Crosshair-style hover over bucket slots, with the shared tooltip layout. */
+function bucketHover(container, ax, buildRows) {
   const tooltip = htmlEl("div", "tooltip");
   container.appendChild(tooltip);
   const hover = svgEl("rect", {
@@ -258,14 +264,14 @@ function dayHover(container, ax, buildRows) {
 
   hover.addEventListener("pointermove", (e) => {
     const rect = ax.svg.getBoundingClientRect();
-    const i = Math.max(0, Math.min(ax.days.length - 1,
+    const i = Math.max(0, Math.min(ax.buckets.length - 1,
       Math.floor((e.clientX - rect.left - ax.m.left) / ax.slot)));
     const rows = buildRows(i);
     if (!rows) { hide(); return; }
     marker.setAttribute("x", ax.m.left + i * ax.slot);
     marker.setAttribute("visibility", "visible");
     tooltip.textContent = "";
-    tooltip.appendChild(htmlEl("div", "when", fmtDayFull(ax.days[i])));
+    tooltip.appendChild(htmlEl("div", "when", fmtBucketFull(ax.buckets[i])));
     for (const r of rows) tooltip.appendChild(r);
     tooltip.style.display = "block";
     const cardRect = container.getBoundingClientRect();
@@ -293,9 +299,9 @@ function tooltipRow(color, name, value) {
   return row;
 }
 
-/* Stacked daily runtime bars for one unit: heating + cooling + idle-on. */
+/* Stacked per-bucket runtime bars for one unit: heating + cooling + idle-on. */
 function runtimeChart(container, unit, yMaxH) {
-  const ax = dayAxis(container, 150);
+  const ax = bucketAxis(container, 150);
   if (!ax) return;
   const rt = state.data.runtime[unit] || {};
   const y = (h) => ax.m.top + (1 - h / yMaxH) * ax.ih;
@@ -306,13 +312,13 @@ function runtimeChart(container, unit, yMaxH) {
       stroke: "var(--grid)", "stroke-width": 1,
     }));
     const label = svgEl("text", { x: ax.m.left - 6, y: y(v) + 3.5, "text-anchor": "end" });
-    label.textContent = `${v}h`;
+    label.textContent = v < 1 ? `${v * 60}m` : `${v}h`;
     ax.svg.appendChild(label);
   }
 
   const barW = Math.max(2, Math.min(ax.slot - 3, ax.slot * 0.72));
-  for (let i = 0; i < ax.days.length; i++) {
-    const vals = rt[ax.days[i]];
+  for (let i = 0; i < ax.buckets.length; i++) {
+    const vals = rt[ax.buckets[i]];
     if (!vals) continue;
     const [on, heat, cool] = vals;
     const idle = Math.max(0, on - heat - cool);
@@ -321,19 +327,21 @@ function runtimeChart(container, unit, yMaxH) {
       [heat, "var(--heat-wash)"], [cool, "var(--cool-wash)"], [idle, "var(--baseline)"],
     ]) {
       if (secs <= 0) continue;
-      const h0 = acc / 3600, h1 = (acc + secs) / 3600;
+      // Clamp to the axis: a bucket can slightly overrun its own length.
+      const h0 = Math.min(acc / 3600, yMaxH), h1 = Math.min((acc + secs) / 3600, yMaxH);
+      acc += secs;
+      if (h1 <= h0) continue;
       ax.svg.appendChild(svgEl("rect", {
         x: ax.center(i) - barW / 2, y: y(h1),
         width: barW, height: Math.max(1, y(h0) - y(h1)),
         fill,
       }));
-      acc += secs;
     }
   }
 
-  dayHover(container, ax, (i) => {
-    const day = ax.days[i];
-    const vals = rt[day];
+  bucketHover(container, ax, (i) => {
+    const bucket = ax.buckets[i];
+    const vals = rt[bucket];
     if (!vals) return [tooltipRow(null, "no data", "")];
     const [on, heat, cool, coverage] = vals;
     const rows = [
@@ -342,9 +350,9 @@ function runtimeChart(container, unit, yMaxH) {
       tooltipRow("var(--baseline)", "on, idle", fmtDur(Math.max(0, on - heat - cool))),
       tooltipRow(null, "total on", fmtDur(on)),
     ];
-    const w = state.data.weather[day];
+    const w = state.data.weather[bucket];
     if (w) rows.push(tooltipRow(null, "outside avg", `${w[0].toFixed(1)}°`));
-    if (coverage < 0.9 * expectedCoverage(day))
+    if (coverage < 0.9 * expectedCoverage(bucket))
       rows.push(htmlEl("div", "extra", `partial data: ${fmtDur(coverage)} recorded`));
     return rows;
   });
@@ -352,15 +360,15 @@ function runtimeChart(container, unit, yMaxH) {
   container.appendChild(ax.svg);
 }
 
-/* Daily outdoor mean line with a min–max band, on the same day slots. */
+/* Outdoor mean line with a min–max band, on the same bucket slots. */
 function outsideChart(container) {
-  const ax = dayAxis(container, 140);
+  const ax = bucketAxis(container, 140);
   if (!ax) return;
   const weather = state.data.weather;
 
   let vLo = Infinity, vHi = -Infinity;
-  for (const day of ax.days) {
-    const w = weather[day];
+  for (const bucket of ax.buckets) {
+    const w = weather[bucket];
     if (!w) continue;
     vLo = Math.min(vLo, w[1]);
     vHi = Math.max(vHi, w[2]);
@@ -383,11 +391,11 @@ function outsideChart(container) {
     ax.svg.appendChild(label);
   }
 
-  // Split into runs of consecutive days with data so gaps break the line.
+  // Split into runs of consecutive buckets with data so gaps break the line.
   const segments = [];
   let seg = [];
-  ax.days.forEach((day, i) => {
-    if (weather[day]) seg.push([i, ...weather[day]]);
+  ax.buckets.forEach((bucket, i) => {
+    if (weather[bucket]) seg.push([i, ...weather[bucket]]);
     else if (seg.length) { segments.push(seg); seg = []; }
   });
   if (seg.length) segments.push(seg);
@@ -415,8 +423,8 @@ function outsideChart(container) {
     }));
   }
 
-  dayHover(container, ax, (i) => {
-    const w = weather[ax.days[i]];
+  bucketHover(container, ax, (i) => {
+    const w = weather[ax.buckets[i]];
     if (!w) return [tooltipRow(null, "no data", "")];
     return [
       tooltipRow("var(--outside)", "mean", `${w[0].toFixed(1)}°`),
@@ -436,7 +444,8 @@ function renderOutside() {
   if (!hasWeather) return;
   const head = htmlEl("div", "card-head");
   head.appendChild(htmlEl("h2", null, "Outside"));
-  head.appendChild(htmlEl("span", "meta", "daily mean · min–max band, °C"));
+  head.appendChild(htmlEl("span", "meta",
+    `${hourly() ? "hourly" : "daily"} mean · min–max band, °C`));
   card.appendChild(head);
   outsideChart(card);
 }
@@ -446,18 +455,20 @@ function renderGrid() {
   grid.textContent = "";
   const d = state.data;
 
-  // Shared y-scale so rooms are directly comparable.
+  // Shared y-scale so rooms are directly comparable. A bucket can read a
+  // little over its own length (the last sample's capped gap bleeds past
+  // the boundary), so clamp before scaling or a 3612s hour forces a 2h axis.
   let maxOn = 0;
   for (const unit of d.units)
     for (const vals of Object.values(d.runtime[unit] || {}))
-      maxOn = Math.max(maxOn, vals[0]);
+      maxOn = Math.max(maxOn, Math.min(vals[0], d.bucket_seconds));
   const yMaxH = Math.max(1, Math.ceil(maxOn / 3600));
 
   for (const unit of d.units) {
     const card = htmlEl("section", "card");
-    const days = d.runtime[unit] || {};
+    const buckets = d.runtime[unit] || {};
     let heat = 0, cool = 0;
-    for (const vals of Object.values(days)) { heat += vals[1]; cool += vals[2]; }
+    for (const vals of Object.values(buckets)) { heat += vals[1]; cool += vals[2]; }
     const head = htmlEl("div", "card-head");
     head.appendChild(htmlEl("h2", null, unit));
     head.appendChild(htmlEl("span", "meta",
@@ -469,26 +480,27 @@ function renderGrid() {
 }
 
 /* Sum runtime over one or more units (a room, or a group's members).
-   Busiest day is by heating + cooling, summed across the units per day. */
+   Busiest bucket is by heating + cooling, summed across the units. */
 function sumRuntime(units) {
-  const perDay = {};
+  const perBucket = {};
   let on = 0, heat = 0, cool = 0, coverage = 0;
   for (const unit of units) {
-    for (const [day, vals] of Object.entries(state.data.runtime[unit] || {})) {
+    for (const [bucket, vals] of Object.entries(state.data.runtime[unit] || {})) {
       on += vals[0]; heat += vals[1]; cool += vals[2]; coverage += vals[3];
-      perDay[day] = (perDay[day] || 0) + vals[1] + vals[2];
+      perBucket[bucket] = (perBucket[bucket] || 0) + vals[1] + vals[2];
     }
   }
   let busiest = null, busiestSecs = 0;
-  for (const [day, secs] of Object.entries(perDay))
-    if (secs > busiestSecs) { busiest = day; busiestSecs = secs; }
+  for (const [bucket, secs] of Object.entries(perBucket))
+    if (secs > busiestSecs) { busiest = bucket; busiestSecs = secs; }
   return { on, heat, cool, coverage, busiest, busiestSecs };
 }
 
 function totalsTable(firstHeader, rows) {
   const table = htmlEl("table");
   const thead = htmlEl("tr");
-  for (const h of [firstHeader, "Heating", "Cooling", "On, idle", "Total on", "On %", "Busiest day"])
+  const busiestHeader = hourly() ? "Busiest hour" : "Busiest day";
+  for (const h of [firstHeader, "Heating", "Cooling", "On, idle", "Total on", "On %", busiestHeader])
     thead.appendChild(htmlEl("th", null, h));
   table.appendChild(thead);
   for (const [labelCell, t] of rows) {
@@ -501,7 +513,7 @@ function totalsTable(firstHeader, rows) {
     tr.appendChild(htmlEl("td", "num",
       t.coverage ? `${(100 * t.on / t.coverage).toFixed(0)}%` : "–"));
     tr.appendChild(htmlEl("td", "num",
-      t.busiest ? `${fmtDayFull(t.busiest)} (${fmtDur(t.busiestSecs)})` : "–"));
+      t.busiest ? `${fmtBucketFull(t.busiest)} (${fmtDur(t.busiestSecs)})` : "–"));
     table.appendChild(tr);
   }
   return table;
@@ -513,7 +525,7 @@ function renderTotals() {
   card.hidden = false;
   card.appendChild(htmlEl("h2", null, "Totals"));
   card.appendChild(htmlEl("div", "meta",
-    "On % is the share of recorded time; busiest day by heating + cooling."));
+    `On % is the share of recorded time; busiest ${hourly() ? "hour" : "day"} by heating + cooling.`));
 
   card.appendChild(totalsTable("Room", state.data.units.map((unit) =>
     [htmlEl("td", null, unit), sumRuntime([unit])])));
@@ -536,16 +548,18 @@ function render() {
   renderOutside();
   renderGrid();
   renderTotals();
-  const days = state.data.days;
+  const buckets = state.data.buckets;
+  const fmt = hourly() ? fmtBucketFull : fmtBucket;
   $("#subtitle").textContent =
-    `${fmtDay(days[0])} – ${fmtDay(days[days.length - 1])}` +
-    ` · daily runtime per room, capped-gap sum of ${Math.round(state.data.sample_interval)}s samples`;
+    `${fmt(buckets[0])} – ${fmt(buckets[buckets.length - 1])}` +
+    ` · ${hourly() ? "hourly" : "daily"} runtime per room,` +
+    ` capped-gap sum of ${Math.round(state.data.sample_interval)}s samples`;
 }
 
 async function refresh() {
   $("#content").classList.add("loading");
   try {
-    const res = await fetch(`/api/stats?days=${state.days}`);
+    const res = await fetch(`/api/stats?${state.query}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.data = await res.json();
     $("#banner").style.display = "none";
@@ -563,9 +577,9 @@ function buildFilters() {
   const filters = $("#filters");
   for (const r of [...RANGES].reverse()) {
     const btn = htmlEl("button", "range", r.label);
-    btn.setAttribute("aria-pressed", String(r.days === state.days));
+    btn.setAttribute("aria-pressed", String(r.query === state.query));
     btn.addEventListener("click", () => {
-      state.days = r.days;
+      state.query = r.query;
       for (const b of filters.querySelectorAll("button"))
         b.setAttribute("aria-pressed", String(b === btn));
       refresh();

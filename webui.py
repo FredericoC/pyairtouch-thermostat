@@ -29,6 +29,7 @@ MAX_POINTS_PER_UNIT = 700  # downsample beyond this to keep payloads light
 MAX_HOURS = 24 * 90
 MAX_LOG_LINES = 2000
 MAX_STAT_DAYS = 366
+MAX_STAT_HOURS = 24 * 14
 
 # Numeric encoding for the activity column, highest control-priority wins when
 # a downsample bucket mixes values. Decoded back to strings client-side.
@@ -166,23 +167,36 @@ class Api:
             "weather": weather,  # [[t, outdoor °C, solar W/m²], ...]
         }
 
-    def stats(self, days: int) -> dict:
-        """Per-day, per-unit runtime aggregates for the stats page.
+    def stats(self, days: int = 0, hours: int = 0) -> dict:
+        """Per-bucket, per-unit runtime aggregates for the stats page.
 
-        Each sample is taken to represent the unit's state until the next
-        sample, so runtime is the sum of those gaps while the unit was on —
-        with each gap capped at twice the sample interval so periods where
-        the service wasn't recording don't count as runtime. Days are local
-        time (the `readings.ts` column is UTC epoch).
+        Buckets are local days (``days=N``) or local hours (``hours=N``, the
+        24h view). Each sample is taken to represent the unit's state until
+        the next sample, so runtime is the sum of those gaps while the unit
+        was on — with each gap capped at twice the sample interval so periods
+        where the service wasn't recording don't count as runtime. Bucketing
+        is local time (the `readings.ts` column is UTC epoch).
         """
-        today = date.today()
-        day_list = [
-            (today - timedelta(days=i)).isoformat()
-            for i in range(days - 1, -1, -1)
-        ]
-        start_ts = int(
-            datetime.combine(today - timedelta(days=days - 1), time.min).timestamp()
-        )
+        if hours:
+            now = datetime.now().replace(minute=0, second=0, microsecond=0)
+            buckets = [
+                (now - timedelta(hours=i)).strftime("%Y-%m-%dT%H:00")
+                for i in range(hours - 1, -1, -1)
+            ]
+            start_ts = int((now - timedelta(hours=hours - 1)).timestamp())
+            bucket_expr = "strftime('%Y-%m-%dT%H:00', ts, 'unixepoch', 'localtime')"
+            bucket_seconds = 3600
+        else:
+            today = date.today()
+            buckets = [
+                (today - timedelta(days=i)).isoformat()
+                for i in range(days - 1, -1, -1)
+            ]
+            start_ts = int(
+                datetime.combine(today - timedelta(days=days - 1), time.min).timestamp()
+            )
+            bucket_expr = "date(ts, 'unixepoch', 'localtime')"
+            bucket_seconds = 86400
         cap = int(2 * self._cfg.history_interval)
         dur = "MIN(COALESCE(dur, 0), :cap)"  # capped seconds until next sample
         with closing(self._connect()) as conn:
@@ -194,7 +208,7 @@ class Api:
                     FROM readings
                     WHERE ts >= :start
                 )
-                SELECT date(ts, 'unixepoch', 'localtime') AS day,
+                SELECT {bucket_expr} AS bucket,
                        unit,
                        SUM(CASE WHEN power THEN {dur} ELSE 0 END),
                        SUM(CASE WHEN activity IN ('heating', 'heating (manual)')
@@ -203,20 +217,20 @@ class Api:
                                 THEN {dur} ELSE 0 END),
                        SUM({dur})
                 FROM samples
-                GROUP BY day, unit
+                GROUP BY bucket, unit
                 """,
                 {"start": start_ts, "cap": cap},
             ).fetchall()
             try:
                 weather = conn.execute(
-                    """
-                    SELECT date(ts, 'unixepoch', 'localtime') AS day,
+                    f"""
+                    SELECT {bucket_expr} AS bucket,
                            ROUND(AVG(outdoor_temp), 1),
                            ROUND(MIN(outdoor_temp), 1),
                            ROUND(MAX(outdoor_temp), 1)
                     FROM weather
                     WHERE ts >= :start AND outdoor_temp IS NOT NULL
-                    GROUP BY day
+                    GROUP BY bucket
                     """,
                     {"start": start_ts},
                 ).fetchall()
@@ -224,19 +238,20 @@ class Api:
                 weather = []  # database predates the weather table
 
         runtime: dict[str, dict[str, list]] = {unit: {} for unit in self._units}
-        for day, unit, on_s, heat_s, cool_s, coverage in rows:
+        for bucket, unit, on_s, heat_s, cool_s, coverage in rows:
             if unit in runtime:
-                # [on, heating, cooling, recorded] seconds for that local day.
-                runtime[unit][day] = [on_s, heat_s, cool_s, coverage]
+                # [on, heating, cooling, recorded] seconds for that bucket.
+                runtime[unit][bucket] = [on_s, heat_s, cool_s, coverage]
         return {
             "units": self._units,
             "groups": {
                 g.name: {"master": g.master, "members": list(g.members)}
                 for g in self._cfg.groups
             },
-            "days": day_list,  # contiguous, oldest first, ends today
+            "buckets": buckets,  # contiguous, oldest first, ends now
+            "bucket_seconds": bucket_seconds,
             "runtime": runtime,
-            "weather": {day: [mean, lo, hi] for day, mean, lo, hi in weather},
+            "weather": {b: [mean, lo, hi] for b, mean, lo, hi in weather},
             "sample_interval": self._cfg.history_interval,
         }
 
@@ -301,8 +316,12 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
                 body = json.dumps(api.data(hours)).encode()
                 self._respond(200, "application/json", body)
             elif parsed.path == "/api/stats":
-                days = min(MAX_STAT_DAYS, max(1, int(query.get("days", ["14"])[0])))
-                body = json.dumps(api.stats(days)).encode()
+                if "hours" in query:
+                    stat_hours = min(MAX_STAT_HOURS, max(1, int(query["hours"][0])))
+                    body = json.dumps(api.stats(hours=stat_hours)).encode()
+                else:
+                    days = min(MAX_STAT_DAYS, max(1, int(query.get("days", ["14"])[0])))
+                    body = json.dumps(api.stats(days=days)).encode()
                 self._respond(200, "application/json", body)
             elif parsed.path == "/api/readings.csv":
                 self._respond(200, "text/csv", api.csv(hours).encode())

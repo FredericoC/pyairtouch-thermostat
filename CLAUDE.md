@@ -27,12 +27,13 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   a service-log panel (`/api/log` tails `climate.log`), and a "Compact"
   toggle (persisted in localStorage) that swaps the charts for small
   at-a-glance status tiles — one screen on a phone. `stats.html` (served at
-  `/stats`, data from `/api/stats?days=N`) is the longer-horizon companion
-  page: per-room daily runtime bars (stacked heating/cooling/idle-on, shared
-  y-scale across rooms), a daily outdoor mean/min–max chart, and a totals
-  table. Runtime is the gap-sum of consecutive on-samples, each gap capped
+  `/stats`, data from `/api/stats?days=N`, or `?hours=24` for the hourly
+  24h view) is the longer-horizon companion page: per-room runtime bars
+  (stacked heating/cooling/idle-on, shared y-scale across rooms, daily or
+  hourly buckets), an outdoor mean/min–max chart, and a totals table.
+  Runtime is the gap-sum of consecutive on-samples, each gap capped
   at 2× the sample interval so recording outages don't count as runtime;
-  days are grouped in local time (`readings.ts` is UTC epoch).
+  buckets are grouped in local time (`readings.ts` is UTC epoch).
   Reuses `load_config` from `climate_service.py`; opens the DB read-only.
   Installable as a standalone Android app: `/manifest.webmanifest` +
   `icon-192.png`/`icon-512.png` (regenerate via an SDF-rendering script if
