@@ -12,7 +12,7 @@ log_file = "climate.log"      # service log file (relative to this config file),
                               # Set to "" to log to stdout only.
 
 [defaults]
-target_low = 22.6             # heat when a room drops below this
+target_low = 23               # heat when a room drops below this
 target_high = 24.8            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
@@ -74,9 +74,14 @@ target_high = 26
 # I’ve chosen the target temperature based on where the heating curve begins to plateau
 # HRV will even it out eventually
 [rooms."Master"]
-target_low = 21.8
+target_low = 22.2
 target_high = 24.8
 
 [rooms."Bed 2"]
-target_low = 22.3
+target_low = 22.2
+target_high = 24.8
+
+# Living pumps hot air into north side, so want it slightly lower as well
+[rooms."Living"]
+target_low = 22.6
 target_high = 24.8
