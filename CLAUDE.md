@@ -26,7 +26,10 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   (default port 8765): combined + per-unit temperature charts, JSON/CSV API,
   a service-log panel (`/api/log` tails `climate.log`), and a "Compact"
   toggle (persisted in localStorage) that swaps the charts for small
-  at-a-glance status tiles — one screen on a phone. `stats.html` (served at
+  at-a-glance status tiles — one screen on a phone. Unit cards are clustered
+  by master group (recessed wash per group) with the group's heat/cool mode
+  chipped in the header — taken from the master's recorded `mode`, which is
+  valid even while the unit is off. `stats.html` (served at
   `/stats`, data from `/api/stats?days=N`, or `?hours=24` for the hourly
   24h view) is the longer-horizon companion page: per-room runtime bars
   (stacked heating/cooling/idle-on, shared y-scale across rooms, daily or

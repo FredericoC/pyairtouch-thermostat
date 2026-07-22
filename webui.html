@@ -86,8 +86,16 @@
   .card .meta { color: var(--text-muted); font-size: 12px; }
   #charts.loading .card { opacity: 0.6; transition: opacity .2s; }
 
-  #grid {
-    margin-top: 14px;
+  #grid { margin-top: 14px; display: flex; flex-direction: column; gap: 14px; }
+  /* Units cluster by their master's group: a recessed wash behind each
+     group's cards (same treatment as the outside tile). */
+  .group { background: var(--band); border-radius: 14px; padding: 10px; }
+  .group-head { display: flex; align-items: baseline; gap: 10px; padding: 2px 4px 8px; }
+  .group-head h2 {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--text-secondary);
+  }
+  .cards {
     display: grid; gap: 14px;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   }
@@ -101,7 +109,10 @@
   .chip.off { color: var(--text-muted); }
 
   /* Compact view: small status tiles instead of chart cards. */
-  #grid.compact {
+  #grid.compact { gap: 8px; }
+  #grid.compact .group { padding: 8px; }
+  #grid.compact .group-head { padding: 0 2px 6px; }
+  #grid.compact .cards {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 8px;
   }
@@ -655,60 +666,88 @@ function renderCombined() {
   })), { height: 300, band: null, powerStrip: false, gap: gapSeconds(), weather });
 }
 
+function unitCard(unit) {
+  const last = latestRaw(unit);
+  const range = state.data.ranges[unit];
+  const card = htmlEl("section", state.compact ? "card tile" : "card");
+  const runKind = last && last[3] && last[4] ? last[4].split(" ")[0] : null;
+  if (runKind === "heating" || runKind === "cooling")
+    card.classList.add(runKind);
+
+  if (state.compact) {
+    const head = htmlEl("div", "tile-head");
+    head.appendChild(htmlEl("h2", null, unit));
+    head.appendChild(statusChip(last));
+    card.appendChild(head);
+    const now = htmlEl("div", "now", last ? fmtTemp(last[1]) : "–");
+    now.appendChild(htmlEl("span", "deg", " °C"));
+    const status = tempStatusEmoji(last && last[1], range);
+    if (status) now.appendChild(htmlEl("span", "status", status));
+    card.appendChild(now);
+    const bits = [];
+    if (last && last[3] && last[2] != null) bits.push(`set ${last[2].toFixed(1)}°`);
+    bits.push(`${range[0].toFixed(1)}–${range[1].toFixed(1)}°`);
+    card.appendChild(htmlEl("div", "meta", bits.join(" · ")));
+    return card;
+  }
+
+  const head = htmlEl("div", "unit-head");
+  head.appendChild(htmlEl("h2", null, unit));
+
+  const isMaster = Object.values(state.data.groups).some((g) => g.master === unit);
+  if (isMaster) head.appendChild(htmlEl("span", "meta", "master"));
+
+  head.appendChild(statusChip(last));
+
+  const now = htmlEl("span", "now", last ? fmtTemp(last[1]) : "–");
+  now.appendChild(htmlEl("span", "deg", " °C"));
+  const status = tempStatusEmoji(last && last[1], range);
+  if (status) now.appendChild(htmlEl("span", "status", status));
+  head.appendChild(now);
+  card.appendChild(head);
+
+  card.appendChild(htmlEl("div", "meta", `target ${range[0].toFixed(1)}–${range[1].toFixed(1)} °C`));
+  return card;
+}
+
 function renderGrid() {
   const grid = $("#grid");
   grid.textContent = "";
   grid.classList.toggle("compact", state.compact);
-  for (const unit of state.data.units) {
-    const last = latestRaw(unit);
-    const range = state.data.ranges[unit];
-    const card = htmlEl("section", state.compact ? "card tile" : "card");
-    const runKind = last && last[3] && last[4] ? last[4].split(" ")[0] : null;
-    if (runKind === "heating" || runKind === "cooling")
-      card.classList.add(runKind);
-
-    if (state.compact) {
-      const head = htmlEl("div", "tile-head");
-      head.appendChild(htmlEl("h2", null, unit));
-      head.appendChild(statusChip(last));
-      card.appendChild(head);
-      const now = htmlEl("div", "now", last ? fmtTemp(last[1]) : "–");
-      now.appendChild(htmlEl("span", "deg", " °C"));
-      const status = tempStatusEmoji(last && last[1], range);
-      if (status) now.appendChild(htmlEl("span", "status", status));
-      card.appendChild(now);
-      const bits = [];
-      if (last && last[3] && last[2] != null) bits.push(`set ${last[2].toFixed(1)}°`);
-      bits.push(`${range[0].toFixed(1)}–${range[1].toFixed(1)}°`);
-      card.appendChild(htmlEl("div", "meta", bits.join(" · ")));
-      grid.appendChild(card);
-      continue;
+  for (const [name, group] of Object.entries(state.data.groups)) {
+    const section = htmlEl("section", "group");
+    const head = htmlEl("div", "group-head");
+    head.appendChild(htmlEl("h2", null, name));
+    // The master's selected mode is the whole group's heat/cool mode, and it
+    // is recorded even while the unit is off (the service keeps masters' mode
+    // aligned without powering them on) — so the chip is always meaningful.
+    const mode = latestRaw(group.master)?.[5];
+    if (mode) {
+      const chip = htmlEl("span", "chip");
+      const dot = htmlEl("span", "dot");
+      dot.style.background = mode === "HEAT" ? "var(--heat-wash)"
+        : mode === "COOL" ? "var(--cool-wash)" : "var(--baseline)";
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(`${mode.toLowerCase()} mode`));
+      head.appendChild(chip);
     }
+    section.appendChild(head);
 
-    const head = htmlEl("div", "unit-head");
-    head.appendChild(htmlEl("h2", null, unit));
-
-    const isMaster = Object.values(state.data.groups).some((g) => g.master === unit);
-    if (isMaster) head.appendChild(htmlEl("span", "meta", "master"));
-
-    head.appendChild(statusChip(last));
-
-    const now = htmlEl("span", "now", last ? fmtTemp(last[1]) : "–");
-    now.appendChild(htmlEl("span", "deg", " °C"));
-    const status = tempStatusEmoji(last && last[1], range);
-    if (status) now.appendChild(htmlEl("span", "status", status));
-    head.appendChild(now);
-    card.appendChild(head);
-
-    card.appendChild(htmlEl("div", "meta", `target ${range[0].toFixed(1)}–${range[1].toFixed(1)} °C`));
-    grid.appendChild(card);
-
-    lineChart(card, [{ name: unit, color: unitColor(unit), points: state.data.series[unit] }],
-      { height: 150, band: range, powerStrip: true, gap: gapSeconds() });
+    const cards = htmlEl("div", "cards");
+    const els = group.members.map((unit) => [unit, unitCard(unit)]);
+    for (const [, el] of els) cards.appendChild(el);
+    section.appendChild(cards);
+    grid.appendChild(section);
+    // Charts after the cards are in the DOM: lineChart measures clientWidth.
+    if (!state.compact)
+      for (const [unit, el] of els)
+        lineChart(el, [{ name: unit, color: unitColor(unit), points: state.data.series[unit] }],
+          { height: 150, band: state.data.ranges[unit], powerStrip: true, gap: gapSeconds() });
   }
 
   // Outside tile: the combined chart (and its outside/sun summary) is hidden
-  // in compact view, so surface the latest weather here instead.
+  // in compact view, so surface the latest weather here instead. Not a unit,
+  // so it sits outside the group washes.
   const w = state.compact ? latestWeather() : {};
   if (w.temp || w.sun) {
     const card = htmlEl("section", "card tile outside");
@@ -726,7 +765,9 @@ function renderGrid() {
     const now = htmlEl("div", "now", w.temp ? fmtTemp(w.temp[1]) : "–");
     now.appendChild(htmlEl("span", "deg", " °C"));
     card.appendChild(now);
-    grid.appendChild(card);
+    const cards = htmlEl("div", "cards");
+    cards.appendChild(card);
+    grid.appendChild(cards);
   }
 }
 

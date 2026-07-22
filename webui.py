@@ -115,8 +115,8 @@ class Api:
             latest_rows = conn.execute(
                 # SQLite: bare columns in a MAX(ts) aggregate come from the
                 # row that held the max.
-                "SELECT unit, MAX(ts), temperature, setpoint, power, activity"
-                " FROM readings GROUP BY unit"
+                "SELECT unit, MAX(ts), temperature, setpoint, power, activity,"
+                " mode FROM readings GROUP BY unit"
             ).fetchall()
             try:
                 weather = conn.execute(
@@ -156,10 +156,13 @@ class Api:
             "sample_interval": self._cfg.history_interval,
             "poll_interval": self._cfg.poll_interval,
             "latest_ts": latest_ts,
-            # Same [t, temp, setpoint, power, activity] shape as series points.
+            # Series-point shape [t, temp, setpoint, power, activity] plus the
+            # unit's selected mode at index 5 — recorded even while off, so
+            # the client can show a group's heat/cool mode when its master
+            # isn't running.
             "latest": {
-                unit: [ts, temp, setpoint, power, activity]
-                for unit, ts, temp, setpoint, power, activity in latest_rows
+                unit: [ts, temp, setpoint, power, activity, mode]
+                for unit, ts, temp, setpoint, power, activity, mode in latest_rows
                 if unit in series
             },
             "bucket": bucket,
