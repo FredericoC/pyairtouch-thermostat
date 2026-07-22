@@ -11,6 +11,11 @@ Heat/cool mode switching is deliberately sticky: a group only flips mode when
 no room still demands the current mode, at least one room demands the opposite
 mode, and `min_mode_dwell_minutes` has elapsed since the last flip.
 
+Demand itself is debounced: a change in what a room asks for must hold for
+`demand_persist_polls` consecutive polls before it drives mode or power
+decisions, so a single glitched console sample can't flip a group's mode
+(which then sticks for the dwell time) or toggle a unit.
+
 Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
 unit off for night or away periods: when a window starts, a single off pass
 turns everything off and the normal control policy is suspended for the rest
@@ -72,6 +77,7 @@ class Config:
     poll_interval: float
     dry_run: bool
     hysteresis: float
+    demand_persist_polls: int  # consecutive polls before a demand change is real
     min_mode_dwell: float  # seconds
     min_power_toggle: float  # seconds
     manage_setpoints: bool
@@ -205,6 +211,7 @@ def load_config(path: Path) -> Config:
         poll_interval=float(service.get("poll_interval_seconds", 30)),
         dry_run=bool(service.get("dry_run", False)),
         hysteresis=hysteresis,
+        demand_persist_polls=max(1, int(defaults.get("demand_persist_polls", 2))),
         min_mode_dwell=float(defaults.get("min_mode_dwell_minutes", 60)) * 60,
         min_power_toggle=float(defaults.get("min_power_toggle_minutes", 10)) * 60,
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
@@ -228,6 +235,9 @@ def load_config(path: Path) -> Config:
 class RoomState:
     running_for: AcMode | None = None  # why *we* have the unit on (HEAT or COOL)
     last_power_change: float | None = None  # monotonic timestamp
+    demand: AcMode | None = None  # debounced demand (drives mode and power)
+    demand_candidate: AcMode | None = None  # raw demand awaiting confirmation
+    demand_streak: int = 0  # consecutive polls the candidate has held
 
 
 @dataclass
@@ -262,26 +272,85 @@ class GroupController:
         for name, unit in self._units.items():
             if unit.power_state in ON_STATES and self._state.desired_mode:
                 self._state.rooms[name].running_for = self._state.desired_mode
+        # Seed the debounced demand from the current readings so the first
+        # pass acts on them (an adopted running unit must not be switched off
+        # as "satisfied" just because its demand hasn't been confirmed yet).
+        for name in self._group.members:
+            self._state.rooms[name].demand = self._raw_demand(name)
 
     # -- demand ------------------------------------------------------------
 
-    def _wants(self, name: str, mode: AcMode) -> bool:
-        """Whether a room demands the given mode, with hysteresis.
+    def _raw_demand(self, name: str) -> AcMode | None:
+        """This poll's instantaneous demand for a room, with hysteresis.
 
         A room starts demanding when it crosses its range boundary and keeps
-        demanding until it has moved `hysteresis` past the boundary.
+        demanding until it has moved `hysteresis` past the boundary. The two
+        thresholds can't overlap (the config loader enforces a wide-enough
+        range), so at most one mode is demanded.
         """
         unit = self._units[name]
         temp = unit.current_temperature
         if temp is None:
-            return False
+            return None
         room = self._cfg.room(name)
-        running = self._state.rooms[name].running_for == mode
-        if mode is AcMode.HEAT:
-            threshold = room.target_low + (self._cfg.hysteresis if running else 0.0)
-            return temp < threshold
-        threshold = room.target_high - (self._cfg.hysteresis if running else 0.0)
-        return temp > threshold
+        running = self._state.rooms[name].running_for
+        low = room.target_low + (self._cfg.hysteresis if running is AcMode.HEAT else 0.0)
+        if temp < low:
+            return AcMode.HEAT
+        high = room.target_high - (self._cfg.hysteresis if running is AcMode.COOL else 0.0)
+        if temp > high:
+            return AcMode.COOL
+        return None
+
+    def _update_demands(self) -> None:
+        """Debounce each room's demand; call once at the start of every pass.
+
+        A single glitched sample (the console has produced spurious readings,
+        e.g. three rooms reporting exactly 25.0°C for one poll) must not flip
+        a group's mode — which then sticks for `min_mode_dwell_minutes` — or
+        toggle a unit's power. A change in a room's demand only takes effect
+        once the same raw demand has held for `demand_persist_polls`
+        consecutive polls.
+        """
+        for name in self._group.members:
+            room_state = self._state.rooms[name]
+            raw = self._raw_demand(name)
+            if raw == room_state.demand:
+                if room_state.demand_candidate is not None or room_state.demand_streak:
+                    _LOGGER.info(
+                        "[%s] %s: transient reading passed, demand stays %s",
+                        self._group.name, name,
+                        room_state.demand.name if room_state.demand else "none",
+                    )
+                room_state.demand_candidate = None
+                room_state.demand_streak = 0
+                continue
+            if raw == room_state.demand_candidate:
+                room_state.demand_streak += 1
+            else:
+                room_state.demand_candidate = raw
+                room_state.demand_streak = 1
+            if room_state.demand_streak >= self._cfg.demand_persist_polls:
+                room_state.demand = raw
+                room_state.demand_candidate = None
+                room_state.demand_streak = 0
+            elif room_state.demand_streak == 1:
+                unit = self._units[name]
+                temp = unit.current_temperature
+                _LOGGER.info(
+                    "[%s] %s: %s suggests demand %s -> %s; waiting for it to "
+                    "persist (%d more poll%s)",
+                    self._group.name, name,
+                    f"{temp:.1f}°C" if temp is not None else "no reading",
+                    room_state.demand.name if room_state.demand else "none",
+                    raw.name if raw else "none",
+                    self._cfg.demand_persist_polls - 1,
+                    "" if self._cfg.demand_persist_polls == 2 else "s",
+                )
+
+    def _wants(self, name: str, mode: AcMode) -> bool:
+        """Whether a room's debounced demand is for the given mode."""
+        return self._state.rooms[name].demand is mode
 
     # -- mode selection ----------------------------------------------------
 
@@ -420,6 +489,7 @@ class GroupController:
                 room_state.last_power_change = now
 
     async def tick(self, now: float) -> None:
+        self._update_demands()
         mode = self._select_mode(now)
         master = self._units[self._group.master]
 

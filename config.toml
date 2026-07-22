@@ -16,6 +16,11 @@ target_low = 23               # heat when a room drops below this
 target_high = 24.8            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
+demand_persist_polls = 2      # a change in a room's demand must hold for this many
+                              # consecutive polls before it's acted on — the console
+                              # occasionally emits one glitched sample (e.g. several
+                              # rooms reading exactly 25.0°C for a single poll) which
+                              # must not flip a group's mode or toggle power
 min_mode_dwell_minutes = 60   # minimum time between heat<->cool switches per group
 min_power_toggle_minutes = 10 # minimum time between on/off changes per unit
 manage_setpoints = true       # also push each unit's setpoint to match the range

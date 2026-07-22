@@ -94,7 +94,12 @@ the room).
 
 Per-room on/off thermostat with hysteresis, plus sticky group mode selection:
 a group flips heat<->cool only when no room demands the current mode, a room
-demands the opposite mode, and `min_mode_dwell_minutes` has passed. Per-unit
+demands the opposite mode, and `min_mode_dwell_minutes` has passed. Room
+demand is debounced (`demand_persist_polls`, default 2): a change must hold
+for that many consecutive polls before it drives mode or power — the console
+occasionally emits a single glitched sample (several rooms reading the same
+wrong value for one poll) that would otherwise flip a group's mode and lock
+it wrong for the whole dwell window. Per-unit
 `min_power_toggle_minutes` prevents compressor short-cycling; while that hold
 keeps a satisfied unit on ("pending off"), its setpoint is parked at the room
 temperature (floor for heat, ceil for cool) so it idles instead of continuing
