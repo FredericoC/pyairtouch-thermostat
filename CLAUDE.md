@@ -99,8 +99,11 @@ demand is debounced (`demand_persist_polls`, default 2): a change must hold
 for that many consecutive polls before it drives mode or power — the console
 occasionally emits a single glitched sample (several rooms reading the same
 wrong value for one poll) that would otherwise flip a group's mode and lock
-it wrong for the whole dwell window. Per-unit
-`min_power_toggle_minutes` prevents compressor short-cycling; while that hold
+it wrong for the whole dwell window.
+`min_power_toggle_minutes` prevents short-cycling of each group's shared
+outdoor unit: the hold applies only to toggles that would start or stop the
+compressor (the group's first unit on / last unit off) — toggling a unit
+while peers keep the compressor running is free. While that hold
 keeps a satisfied unit on ("pending off"), its setpoint is parked at the room
 temperature (floor for heat, ceil for cool) so it idles instead of continuing
 to condition the room — the boosted setpoint returns on the next run.

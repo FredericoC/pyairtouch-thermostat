@@ -16,6 +16,11 @@ Demand itself is debounced: a change in what a room asks for must hold for
 decisions, so a single glitched console sample can't flip a group's mode
 (which then sticks for the dwell time) or toggle a unit.
 
+Anti-short-cycling (`min_power_toggle_minutes`) protects each group's shared
+outdoor unit: its compressor runs whenever any member is on, so only toggles
+that would start or stop the compressor are held back — turning one unit
+on/off while its peers keep the compressor running is free.
+
 Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
 unit off for night or away periods: when a window starts, a single off pass
 turns everything off and the normal control policy is suspended for the rest
@@ -234,7 +239,6 @@ def load_config(path: Path) -> Config:
 @dataclass
 class RoomState:
     running_for: AcMode | None = None  # why *we* have the unit on (HEAT or COOL)
-    last_power_change: float | None = None  # monotonic timestamp
     demand: AcMode | None = None  # debounced demand (drives mode and power)
     demand_candidate: AcMode | None = None  # raw demand awaiting confirmation
     demand_streak: int = 0  # consecutive polls the candidate has held
@@ -244,6 +248,11 @@ class RoomState:
 class GroupState:
     desired_mode: AcMode | None = None
     last_mode_change: float | None = None
+    # The group shares one outdoor unit: its compressor runs whenever any
+    # member is on. Anti-short-cycling therefore tracks the *aggregate*
+    # on/off state, not individual units.
+    compressor_on: bool = False
+    compressor_change: float | None = None  # monotonic ts of last start/stop
     rooms: dict[str, RoomState] = field(default_factory=dict)
 
 
@@ -262,6 +271,7 @@ class GroupController:
         self._state = GroupState(
             rooms={name: RoomState() for name in group.members}
         )
+        self._commanded: dict[str, bool] = {}  # power sent this pass, name -> on
         self._adopt_current_state()
 
     def _adopt_current_state(self) -> None:
@@ -277,6 +287,11 @@ class GroupController:
         # as "satisfied" just because its demand hasn't been confirmed yet).
         for name in self._group.members:
             self._state.rooms[name].demand = self._raw_demand(name)
+        # compressor_change stays None: we don't know when the outdoor unit
+        # last started or stopped, so the first pass isn't held back.
+        self._state.compressor_on = any(
+            self._units[n].power_state in ON_STATES for n in self._group.members
+        )
 
     # -- demand ------------------------------------------------------------
 
@@ -351,6 +366,33 @@ class GroupController:
     def _wants(self, name: str, mode: AcMode) -> bool:
         """Whether a room's debounced demand is for the given mode."""
         return self._state.rooms[name].demand is mode
+
+    # -- compressor (shared outdoor unit) ------------------------------------
+
+    def _note_compressor(self, on: bool, now: float) -> None:
+        """Record a start/stop of the group's outdoor unit, ignoring no-ops."""
+        if on != self._state.compressor_on:
+            self._state.compressor_on = on
+            self._state.compressor_change = now
+
+    def _observe_compressor(self, now: float) -> None:
+        """Catch aggregate on/off flips we didn't command (wall panel, app)."""
+        self._note_compressor(
+            any(self._units[n].power_state in ON_STATES for n in self._group.members),
+            now,
+        )
+
+    def _peers_on(self, name: str) -> bool:
+        """Whether any *other* member keeps the outdoor unit running.
+
+        Power commands sent earlier in the same pass count too — the console
+        may not have pushed the resulting state back yet.
+        """
+        return any(
+            self._commanded.get(n, self._units[n].power_state in ON_STATES)
+            for n in self._group.members
+            if n != name
+        )
 
     # -- mode selection ----------------------------------------------------
 
@@ -427,8 +469,8 @@ class GroupController:
         await self._send_setpoint(name, target)
 
     async def _apply_idle_setpoint(self, name: str, mode: AcMode, temp: float) -> None:
-        # The room is satisfied but min_power_toggle_minutes is holding the
-        # unit on. Park the setpoint at the room temperature — rounded down
+        # The room is satisfied but the compressor hold is keeping the last
+        # running unit on. Park the setpoint at the room temperature — rounded down
         # for heat, up for cool — so the unit's own thermostat idles instead
         # of pushing more heat/cool into an already-satisfied room. The normal
         # boosted setpoint is restored on the next power-on (or if demand
@@ -486,9 +528,11 @@ class GroupController:
                     f"[{self._group.name}] {name}: power → OFF (shutdown window)",
                     unit.set_power(AcPowerControl.TURN_OFF),
                 )
-                room_state.last_power_change = now
+        self._note_compressor(False, now)
 
     async def tick(self, now: float) -> None:
+        self._observe_compressor(now)
+        self._commanded.clear()
         self._update_demands()
         mode = self._select_mode(now)
         master = self._units[self._group.master]
@@ -528,12 +572,18 @@ class GroupController:
                 await self._apply_setpoint(name, mode)
             return
 
+        # Anti short-cycling protects the group's shared outdoor unit, not the
+        # room: toggling a unit while its peers keep the compressor running is
+        # free, but a toggle that would start or stop the compressor must wait
+        # min_power_toggle_minutes since the compressor's last start/stop.
+        compressor_toggle = not self._peers_on(name)
         if (
-            room_state.last_power_change is not None
-            and now - room_state.last_power_change < self._cfg.min_power_toggle
+            compressor_toggle
+            and self._state.compressor_change is not None
+            and now - self._state.compressor_change < self._cfg.min_power_toggle
         ):
-            # Anti short-cycling: too soon since the last toggle. If the unit
-            # is pending off, stop it heating/cooling the room in the meantime.
+            # Too soon. If the unit is pending off, stop it heating/cooling
+            # the already-satisfied room in the meantime.
             if is_on and self._cfg.manage_setpoints:
                 await self._apply_idle_setpoint(name, mode, temp)
             return
@@ -557,7 +607,9 @@ class GroupController:
                 f"({temp:.1f}°C, range {room.target_low:.1f}–{room.target_high:.1f})",
                 unit.set_power(AcPowerControl.TURN_OFF),
             )
-        room_state.last_power_change = now
+        self._commanded[name] = should_run
+        if compressor_toggle:
+            self._note_compressor(should_run, now)
 
     def history_rows(self, *, shutdown: bool = False) -> list[tuple]:
         """One (unit, temperature, setpoint, power, mode, activity) per member."""
