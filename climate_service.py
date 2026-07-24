@@ -930,8 +930,14 @@ class ClimateService:
         self._stop = asyncio.Event()
         # True once the off pass for the current shutdown window has been sent;
         # lives on the service so a reconnect mid-window does not repeat the
-        # pass and override manual changes.
-        self._was_shutdown = False
+        # pass and override manual changes. Seeded from the current state so a
+        # *restart* mid-window doesn't repeat it either: it would switch off
+        # manually-on units and stamp a compressor stop that then holds the
+        # whole group off for min_power_toggle_minutes (seen when a deploy
+        # preceded a dashboard "turn on" by a minute). Trade-off: a window
+        # that begins while the service is down gets no off pass.
+        _, paused, shutdown = self._override_state()
+        self._was_shutdown = shutdown and not paused
         self._was_paused = False  # so the release pass runs once per pause
         self._last_override: bool | str | None = None  # last poll's dashboard override
         self._history: HistoryRecorder | None = None
@@ -943,6 +949,15 @@ class ClimateService:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def _override_state(self) -> tuple[dict | None, bool, bool]:
+        """This moment's (dashboard override, paused, effective shutdown)."""
+        override = read_control_override(self._cfg.override_path)
+        paused = bool(override and override.get("pause"))
+        shutdown = self._cfg.shutdown_active(datetime.now())
+        if override is not None and not paused:
+            shutdown = override["shutdown"]
+        return override, paused, shutdown
 
     def _log_override_change(self, override: dict | None) -> None:
         if override is None:
@@ -1047,11 +1062,7 @@ class ClimateService:
                 raise ConnectionError("AirTouch connection is no longer initialised")
 
             now = time.monotonic()
-            override = read_control_override(self._cfg.override_path)
-            paused = bool(override and override.get("pause"))
-            shutdown = self._cfg.shutdown_active(datetime.now())
-            if override is not None and not paused:
-                shutdown = override["shutdown"]
+            override, paused, shutdown = self._override_state()
             suspended = paused or shutdown  # control policy not driving units
             self._log_override_change(override)
             for controller in controllers:
