@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from climate_service import Config, load_config
+from climate_service import Config, load_config, read_shutdown_override
 
 _LOGGER = logging.getLogger("webui")
 
@@ -153,6 +153,9 @@ class Api:
             # (start, end) minutes past midnight; the client formats these and
             # decides "active now" with its own clock (same household/timezone).
             "shutdown_windows": [list(w) for w in self._cfg.shutdown_windows],
+            # {"shutdown": bool, "expires": epoch s} or None — replaces the
+            # scheduled state until it expires (next window boundary).
+            "shutdown_override": read_shutdown_override(self._cfg.override_path),
             "sample_interval": self._cfg.history_interval,
             "poll_interval": self._cfg.poll_interval,
             "latest_ts": latest_ts,
@@ -258,6 +261,33 @@ class Api:
             "sample_interval": self._cfg.history_interval,
         }
 
+    def set_override(self, shutdown: bool | None) -> dict | None:
+        """Write (or clear, shutdown=None) the shutdown override file.
+
+        The climate service picks the file up on its next poll. The override
+        expires at the next shutdown-window boundary, so it flips the current
+        period's state and then hands back to the schedule — "on" during the
+        night window resumes control until the scheduled shutdown time.
+        """
+        path = self._cfg.override_path
+        if shutdown is None:
+            path.unlink(missing_ok=True)
+            return None
+        boundary = self._cfg.next_shutdown_boundary(datetime.now())
+        if boundary is None:
+            raise ValueError("no shutdown windows configured")
+        override = {"shutdown": shutdown, "expires": boundary.timestamp()}
+        # Write-then-rename so the service can never read a partial file.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(override), encoding="utf-8")
+        tmp.replace(path)
+        _LOGGER.info(
+            "shutdown override: %s until %s",
+            "shutdown" if shutdown else "control resumed",
+            boundary.strftime("%H:%M"),
+        )
+        return override
+
     def csv(self, hours: float) -> str:
         with closing(self._connect()) as conn:
             rows = conn.execute(
@@ -303,6 +333,32 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
             except Exception:
                 _LOGGER.exception("error handling %s", self.path)
                 self._respond(500, "text/plain", b"internal error")
+
+        def do_POST(self) -> None:  # noqa: N802 (http.server API)
+            try:
+                self._route_post()
+            except BrokenPipeError:
+                pass
+            except Exception:
+                _LOGGER.exception("error handling POST %s", self.path)
+                self._respond(500, "text/plain", b"internal error")
+
+        def _route_post(self) -> None:
+            if urlparse(self.path).path != "/api/override":
+                self._respond(404, "text/plain", b"not found")
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+                shutdown = body.get("shutdown")  # true / false / null (clear)
+                if not isinstance(shutdown, (bool, type(None))):
+                    raise ValueError("'shutdown' must be true, false or null")
+                override = api.set_override(shutdown)
+            except ValueError as exc:
+                self._respond(400, "text/plain", str(exc).encode())
+                return
+            self._respond(200, "application/json",
+                          json.dumps({"shutdown_override": override}).encode())
 
         def _route(self) -> None:
             parsed = urlparse(self.path)

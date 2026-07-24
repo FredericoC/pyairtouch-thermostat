@@ -58,6 +58,14 @@
   #next.stale { color: #e34948; font-weight: 600; }
   #shutdown { font-variant-numeric: tabular-nums; }
   #shutdown.active { color: var(--text-primary); font-weight: 600; }
+  #overrideBtn {
+    font: inherit; font-size: 11.5px; font-weight: 400; color: var(--text-secondary);
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1px 9px; margin-left: 8px; cursor: pointer;
+    vertical-align: 1px;
+  }
+  #overrideBtn:hover { color: var(--text-primary); }
+  #overrideBtn:disabled { opacity: 0.5; cursor: default; }
   .now .status { font-size: 0.7em; font-weight: 400; margin-left: 3px; }
   @media (prefers-color-scheme: dark) { #next.stale { color: #e66767; } }
 
@@ -179,7 +187,7 @@
 
 <h1>AirTouch temperatures</h1>
 <div class="sub"><span id="subtitle">Loading…</span><span id="next"></span></div>
-<div class="sub" id="shutdown" hidden></div>
+<div class="sub" id="shutdown" hidden><span id="shutdownText"></span><button id="overrideBtn"></button></div>
 
 <div class="filters" id="filters">
   <button id="compactBtn">Compact</button>
@@ -807,11 +815,23 @@ function renderTable() {
    same household as the service, so close enough for display. */
 const fmtHM = (m) =>
   `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
-function shutdownActiveNow() {
+function scheduledShutdownNow() {
   const now = new Date();
   const minute = now.getHours() * 60 + now.getMinutes();
   return (state.data?.shutdown_windows || []).some(([s, e]) =>
     s < e ? minute >= s && minute < e : minute >= s || minute < e);
+}
+/* Dashboard override ({shutdown, expires} epoch s, or null): replaces the
+   scheduled state until it expires at the next window boundary. Expiry is
+   re-checked against the browser clock so the display flips on time even
+   between data refreshes. */
+function activeOverride() {
+  const ov = state.data?.shutdown_override;
+  return ov && ov.expires > Date.now() / 1000 ? ov : null;
+}
+function shutdownActiveNow() {
+  const ov = activeOverride();
+  return ov ? ov.shutdown : scheduledShutdownNow();
 }
 let shutdownRenderedFor = null;
 function renderShutdown() {
@@ -822,13 +842,47 @@ function renderShutdown() {
   const minute = now.getHours() * 60 + now.getMinutes();
   if (shutdownRenderedFor === minute) return;
   shutdownRenderedFor = minute;
+  const override = activeOverride();
   const active = shutdownActiveNow();
   const spans = windows.map(([s, e]) => `${fmtHM(s)}–${fmtHM(e)}`).join(", ");
-  el.textContent = `Shutdown ${spans} · ` +
+  let text = `Shutdown ${spans} · ` +
     (active ? "🌙 active now — control paused" : "not active");
+  if (override) {
+    const d = new Date(override.expires * 1000);
+    text += ` · overridden until ${fmtHM(d.getHours() * 60 + d.getMinutes())}`;
+  }
+  $("#shutdownText").textContent = text;
+  $("#overrideBtn").textContent = active ? "Turn on" : "Turn off";
   el.classList.toggle("active", active);
   el.hidden = false;
 }
+
+/* The button flips the effective state until the next window boundary: "Turn
+   on" during the night window resumes control (the schedule shuts things down
+   again at the next window start); "Turn off" during the day forces a
+   shutdown until the night window takes over. Pressing it again undoes the
+   override for the rest of the current period. */
+$("#overrideBtn").addEventListener("click", async () => {
+  const btn = $("#overrideBtn");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shutdown: !shutdownActiveNow() }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.data.shutdown_override = (await res.json()).shutdown_override;
+    shutdownRenderedFor = null;
+    render(); // status chips ("pending off" vs manual) depend on the state too
+  } catch (err) {
+    const banner = $("#banner");
+    banner.textContent = `Could not set the shutdown override (${err.message}).`;
+    banner.style.display = "block";
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function gapSeconds() {
   return Math.max(600, 3 * (state.data.bucket || state.data.sample_interval));

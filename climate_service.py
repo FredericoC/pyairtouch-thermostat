@@ -25,6 +25,11 @@ Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
 unit off for night or away periods: when a window starts, a single off pass
 turns everything off and the normal control policy is suspended for the rest
 of the window. A unit switched on manually during the window is left alone.
+The web dashboard can override the shutdown state either way via a small JSON
+file (`shutdown_override.json` beside the config, read every poll); the
+override expires at the next window boundary, so it never outlasts the
+schedule — "turn on" during the night window resumes control until the next
+scheduled shutdown time.
 
 Run with:
     python climate_service.py                 # uses ./config.toml
@@ -34,6 +39,7 @@ Run with:
 
 import argparse
 import asyncio
+import json
 import logging
 import logging.handlers
 import math
@@ -43,7 +49,7 @@ import sys
 import time
 import tomllib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pyairtouch
@@ -93,6 +99,7 @@ class Config:
     weather_path: str
     log_path: Path | None  # None = file logging disabled (stdout only)
     shutdown_windows: tuple[tuple[int, int], ...]  # (start, end) minutes past midnight
+    override_path: Path  # dashboard's shutdown override file (may not exist)
     groups: tuple[GroupConfig, ...]
     rooms: dict[str, RoomConfig]
 
@@ -108,6 +115,25 @@ class Config:
             elif minute >= start or minute < end:  # window crosses midnight
                 return True
         return False
+
+    def next_shutdown_boundary(self, local_now: datetime) -> datetime | None:
+        """When the next shutdown window starts or ends (whichever comes first).
+
+        Shutdown overrides expire here: bounded by the nearest boundary, an
+        override can flip the current period's state but never bleed into the
+        next one — "on" during the night window lasts at most until the window
+        ends, "off" during the day at most until the next window begins.
+        """
+        if not self.shutdown_windows:
+            return None
+        minute = local_now.hour * 60 + local_now.minute
+        # A boundary at the current minute counts as tomorrow's, hence the -1/+1.
+        delta = min(
+            (b - minute - 1) % (24 * 60) + 1
+            for window in self.shutdown_windows
+            for b in window
+        )
+        return local_now.replace(second=0, microsecond=0) + timedelta(minutes=delta)
 
 
 def _parse_time_of_day(text: str, *, allow_2400: bool = False) -> int:
@@ -190,6 +216,10 @@ def load_config(path: Path) -> Config:
             raise ValueError("[shutdown] windows must be a list of 'HH:MM-HH:MM' strings")
         shutdown_windows = tuple(_parse_shutdown_window(s) for s in specs)
 
+    # Written by the web dashboard, read by the service every poll. Lives
+    # beside the config so both processes agree on the path.
+    override_path = path.parent / "shutdown_override.json"
+
     history = raw.get("history", {})
     history_path: Path | None = None
     if history.get("enabled", True):
@@ -227,9 +257,28 @@ def load_config(path: Path) -> Config:
         weather_path=str(weather.get("path", "/data/report/")),
         log_path=log_path,
         shutdown_windows=shutdown_windows,
+        override_path=override_path,
         groups=groups,
         rooms=rooms,
     )
+
+
+def read_shutdown_override(path: Path) -> dict | None:
+    """The dashboard's shutdown override, or None if absent/expired/invalid.
+
+    Returns {"shutdown": bool, "expires": epoch seconds}. `shutdown` replaces
+    the scheduled window state until `expires` (the next window boundary at
+    the time the override was written — see Config.next_shutdown_boundary).
+    Shared with webui.py, which writes the file.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        override = {"shutdown": bool(raw["shutdown"]), "expires": float(raw["expires"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if time.time() >= override["expires"]:
+        return None
+    return override
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +909,7 @@ class ClimateService:
         # lives on the service so a reconnect mid-window does not repeat the
         # pass and override manual changes.
         self._was_shutdown = False
+        self._last_override: bool | None = None  # last poll's dashboard override
         self._history: HistoryRecorder | None = None
         if cfg.history_path is not None:
             self._history = HistoryRecorder(cfg.history_path, cfg.history_interval)
@@ -869,6 +919,21 @@ class ClimateService:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def _log_override_change(self, override: dict | None) -> None:
+        current = None if override is None else override["shutdown"]
+        if current == self._last_override:
+            return
+        self._last_override = current
+        if override is None:
+            _LOGGER.info("Dashboard shutdown override ended — back on schedule")
+        else:
+            until = datetime.fromtimestamp(override["expires"]).strftime("%H:%M")
+            _LOGGER.info(
+                "Dashboard override: %s until %s",
+                "shutdown" if override["shutdown"] else "control resumed",
+                until,
+            )
 
     async def _connect(self) -> tuple[pyairtouch.AirTouch, list[GroupController]]:
         discovered = await pyairtouch.discover(remote_host=self._cfg.host or None)
@@ -953,6 +1018,10 @@ class ClimateService:
 
             now = time.monotonic()
             shutdown = self._cfg.shutdown_active(datetime.now())
+            override = read_shutdown_override(self._cfg.override_path)
+            if override is not None:
+                shutdown = override["shutdown"]
+            self._log_override_change(override)
             for controller in controllers:
                 if shutdown:
                     # One off pass at window start only; manual changes made
@@ -971,6 +1040,14 @@ class ClimateService:
                 )
 
             signatures, lines = [], []
+            if override is not None:
+                until = datetime.fromtimestamp(override["expires"]).strftime("%H:%M")
+                lines.append(
+                    f"Dashboard override: "
+                    f"{'shutdown' if override['shutdown'] else 'control resumed'} "
+                    f"until {until}"
+                )
+                signatures.append(f"override:{override['shutdown']}")
             if shutdown:
                 lines.append("SHUTDOWN window active — units switched off at "
                              "window start; manual changes are respected")

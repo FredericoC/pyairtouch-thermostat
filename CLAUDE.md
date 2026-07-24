@@ -117,4 +117,10 @@ when reading `current_temperature`.
 everything off for night/away periods: when a window starts, one off pass
 powers every unit off (bypassing `min_power_toggle_minutes`) and the control
 policy is suspended for the rest of the window. A unit switched on manually
-during the window is left on.
+during the window is left on. The dashboard's "Turn on"/"Turn off" button
+(POST `/api/override`) overrides the shutdown state via
+`shutdown_override.json` (beside the config; webui writes it, the service
+reads it every poll). The override expires at the next window boundary, so it
+flips the current period only — "on" overnight resumes control until the next
+scheduled shutdown; pressing again undoes it. Requires configured windows
+(the expiry is derived from them).
