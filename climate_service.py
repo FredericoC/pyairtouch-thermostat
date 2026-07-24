@@ -26,10 +26,13 @@ unit off for night or away periods: when a window starts, a single off pass
 turns everything off and the normal control policy is suspended for the rest
 of the window. A unit switched on manually during the window is left alone.
 The web dashboard can override the shutdown state either way via a small JSON
-file (`shutdown_override.json` beside the config, read every poll); the
+file (`control_override.json` beside the config, read every poll); the
 override expires at the next window boundary, so it never outlasts the
 schedule — "turn on" during the night window resumes control until the next
-scheduled shutdown time.
+scheduled shutdown time. The same file can instead hold a pause: control is
+fully suspended (no power/mode/setpoint commands, shutdown passes included)
+until resumed from the dashboard, while temperature/weather recording carries
+on — for running the units manually, or not at all, and still monitoring.
 
 Run with:
     python climate_service.py                 # uses ./config.toml
@@ -218,7 +221,7 @@ def load_config(path: Path) -> Config:
 
     # Written by the web dashboard, read by the service every poll. Lives
     # beside the config so both processes agree on the path.
-    override_path = path.parent / "shutdown_override.json"
+    override_path = path.parent / "control_override.json"
 
     history = raw.get("history", {})
     history_path: Path | None = None
@@ -263,18 +266,23 @@ def load_config(path: Path) -> Config:
     )
 
 
-def read_shutdown_override(path: Path) -> dict | None:
-    """The dashboard's shutdown override, or None if absent/expired/invalid.
+def read_control_override(path: Path) -> dict | None:
+    """The dashboard's control override, or None if absent/expired/invalid.
 
-    Returns {"shutdown": bool, "expires": epoch seconds}. `shutdown` replaces
-    the scheduled window state until `expires` (the next window boundary at
-    the time the override was written — see Config.next_shutdown_boundary).
+    Two forms. {"pause": true}: control is fully suspended — no commands at
+    all, shutdown passes included — until cleared from the dashboard, while
+    recording continues (for running the units manually and still
+    monitoring). {"shutdown": bool, "expires": epoch seconds}: replaces the
+    scheduled window state until `expires` (the next window boundary at the
+    time the override was written — see Config.next_shutdown_boundary).
     Shared with webui.py, which writes the file.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("pause"):
+            return {"pause": True}
         override = {"shutdown": bool(raw["shutdown"]), "expires": float(raw["expires"])}
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
     if time.time() >= override["expires"]:
         return None
@@ -561,6 +569,17 @@ class GroupController:
             unit.set_target_temperature(target),
         )
 
+    def release(self) -> None:
+        """Forget which units we're driving — control has been paused.
+
+        Called once when a dashboard pause starts. No commands are sent:
+        whatever runs from here on is manual, so clearing `running_for` makes
+        the history and status report it as such. On resume, the next tick
+        re-establishes demand and takes the units back over.
+        """
+        for room_state in self._state.rooms.values():
+            room_state.running_for = None
+
     async def enforce_shutdown(self, now: float) -> None:
         """Force every unit off, regardless of demand or anti-short-cycle timers.
 
@@ -660,8 +679,12 @@ class GroupController:
         if compressor_toggle:
             self._note_compressor(should_run, now)
 
-    def history_rows(self, *, shutdown: bool = False) -> list[tuple]:
-        """One (unit, temperature, setpoint, power, mode, activity) per member."""
+    def history_rows(self, *, suspended: bool = False) -> list[tuple]:
+        """One (unit, temperature, setpoint, power, mode, activity) per member.
+
+        `suspended` = the control policy isn't driving the units right now
+        (shutdown window or dashboard pause).
+        """
         rows = []
         for name in self._group.members:
             unit = self._units[name]
@@ -669,10 +692,10 @@ class GroupController:
             running_for = self._state.rooms[name].running_for
             if on and running_for:
                 activity = f"{running_for.name.lower()}ing"
-            elif on and shutdown and unit.active_mode in (AcMode.HEAT, AcMode.COOL):
-                # Switched on manually during a shutdown window: the control
-                # policy isn't driving it, but the unit's own mode says what
-                # it's doing. active_mode resolves AUTO to heat/cool.
+            elif on and suspended and unit.active_mode in (AcMode.HEAT, AcMode.COOL):
+                # Switched on manually while control is suspended: the policy
+                # isn't driving it, but the unit's own mode says what it's
+                # doing. active_mode resolves AUTO to heat/cool.
                 activity = f"{unit.active_mode.name.lower()}ing (manual)"
             elif on:
                 activity = "on"
@@ -701,7 +724,7 @@ class GroupController:
         return "switching next pass"
 
     def status_report(
-        self, now: float, *, shutdown: bool = False
+        self, now: float, *, suspended: bool = False
     ) -> tuple[str, list[str]]:
         """Render the group's status as human-readable lines.
 
@@ -729,8 +752,8 @@ class GroupController:
             running_for = self._state.rooms[name].running_for
 
             detail = ""
-            if shutdown:
-                activity = "shutdown" if not on else "on manually (shutdown window)"
+            if suspended:
+                activity = "control suspended" if not on else "on manually (control suspended)"
             elif on and running_for:
                 activity = f"{running_for.name.lower()}ing"
                 if running_for is AcMode.HEAT:
@@ -878,13 +901,13 @@ class HistoryRecorder:
         controllers: list["GroupController"],
         weather: tuple[float | None, float | None] | None = None,
         *,
-        shutdown: bool = False,
+        suspended: bool = False,
     ) -> None:
         if now - self._last_sample < self._interval:
             return
         self._last_sample = now
         ts = int(time.time())
-        rows = [row for c in controllers for row in c.history_rows(shutdown=shutdown)]
+        rows = [row for c in controllers for row in c.history_rows(suspended=suspended)]
         self._conn.executemany(
             "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?, ?)",
             [(ts, *row) for row in rows],
@@ -909,7 +932,8 @@ class ClimateService:
         # lives on the service so a reconnect mid-window does not repeat the
         # pass and override manual changes.
         self._was_shutdown = False
-        self._last_override: bool | None = None  # last poll's dashboard override
+        self._was_paused = False  # so the release pass runs once per pause
+        self._last_override: bool | str | None = None  # last poll's dashboard override
         self._history: HistoryRecorder | None = None
         if cfg.history_path is not None:
             self._history = HistoryRecorder(cfg.history_path, cfg.history_interval)
@@ -921,12 +945,18 @@ class ClimateService:
         self._stop.set()
 
     def _log_override_change(self, override: dict | None) -> None:
-        current = None if override is None else override["shutdown"]
+        if override is None:
+            current = None
+        else:
+            current = "pause" if override.get("pause") else override["shutdown"]
         if current == self._last_override:
             return
         self._last_override = current
         if override is None:
-            _LOGGER.info("Dashboard shutdown override ended — back on schedule")
+            _LOGGER.info("Dashboard override ended — back on schedule")
+        elif current == "pause":
+            _LOGGER.info("Dashboard pause: control suspended until resumed "
+                         "(recording continues)")
         else:
             until = datetime.fromtimestamp(override["expires"]).strftime("%H:%M")
             _LOGGER.info(
@@ -1017,30 +1047,43 @@ class ClimateService:
                 raise ConnectionError("AirTouch connection is no longer initialised")
 
             now = time.monotonic()
+            override = read_control_override(self._cfg.override_path)
+            paused = bool(override and override.get("pause"))
             shutdown = self._cfg.shutdown_active(datetime.now())
-            override = read_shutdown_override(self._cfg.override_path)
-            if override is not None:
+            if override is not None and not paused:
                 shutdown = override["shutdown"]
+            suspended = paused or shutdown  # control policy not driving units
             self._log_override_change(override)
             for controller in controllers:
-                if shutdown:
+                if paused:
+                    # Send nothing at all — not even the shutdown off pass.
+                    if not self._was_paused:
+                        controller.release()
+                elif shutdown:
                     # One off pass at window start only; manual changes made
                     # during the window are left alone.
                     if not self._was_shutdown:
                         await controller.enforce_shutdown(now)
                 else:
                     await controller.tick(now)
-            self._was_shutdown = shutdown
+            self._was_paused = paused
+            # False while paused so that resuming inside a shutdown window
+            # runs the off pass (resume means "back to schedule").
+            self._was_shutdown = shutdown and not paused
 
             if self._history:
                 self._history.maybe_record(
                     now, controllers,
                     self._weather.sample(now) if self._weather else None,
-                    shutdown=shutdown,
+                    suspended=suspended,
                 )
 
             signatures, lines = [], []
-            if override is not None:
+            if paused:
+                lines.append("PAUSED from dashboard — control suspended, "
+                             "recording continues; resume from the dashboard")
+                signatures.append("paused")
+            elif override is not None:
                 until = datetime.fromtimestamp(override["expires"]).strftime("%H:%M")
                 lines.append(
                     f"Dashboard override: "
@@ -1048,12 +1091,12 @@ class ClimateService:
                     f"until {until}"
                 )
                 signatures.append(f"override:{override['shutdown']}")
-            if shutdown:
+            if shutdown and not paused:
                 lines.append("SHUTDOWN window active — units switched off at "
                              "window start; manual changes are respected")
                 signatures.append("shutdown")
             for controller in controllers:
-                sig, group_lines = controller.status_report(now, shutdown=shutdown)
+                sig, group_lines = controller.status_report(now, suspended=suspended)
                 signatures.append(sig)
                 lines.extend(group_lines)
             signature = "||".join(signatures)

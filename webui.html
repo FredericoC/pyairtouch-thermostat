@@ -58,14 +58,14 @@
   #next.stale { color: #e34948; font-weight: 600; }
   #shutdown { font-variant-numeric: tabular-nums; }
   #shutdown.active { color: var(--text-primary); font-weight: 600; }
-  #overrideBtn {
+  #shutdown button {
     font: inherit; font-size: 11.5px; font-weight: 400; color: var(--text-secondary);
     background: var(--surface-1); border: 1px solid var(--border);
     border-radius: 6px; padding: 1px 9px; margin-left: 8px; cursor: pointer;
     vertical-align: 1px;
   }
-  #overrideBtn:hover { color: var(--text-primary); }
-  #overrideBtn:disabled { opacity: 0.5; cursor: default; }
+  #shutdown button:hover { color: var(--text-primary); }
+  #shutdown button:disabled { opacity: 0.5; cursor: default; }
   .now .status { font-size: 0.7em; font-weight: 400; margin-left: 3px; }
   @media (prefers-color-scheme: dark) { #next.stale { color: #e66767; } }
 
@@ -187,7 +187,7 @@
 
 <h1>AirTouch temperatures</h1>
 <div class="sub"><span id="subtitle">Loading…</span><span id="next"></span></div>
-<div class="sub" id="shutdown" hidden><span id="shutdownText"></span><button id="overrideBtn"></button></div>
+<div class="sub" id="shutdown" hidden><span id="shutdownText"></span><button id="overrideBtn"></button><button id="pauseBtn"></button></div>
 
 <div class="filters" id="filters">
   <button id="compactBtn">Compact</button>
@@ -626,9 +626,10 @@ function statusChip(last) {
     chip.appendChild(dot);
     // Activity "on" means powered but the control policy no longer wants it
     // running — the room reached temp and the unit is waiting out
-    // min_power_toggle_minutes. During a shutdown window "on" instead means
-    // switched on manually, and the service leaves it alone.
-    const pendingOff = kind === "on" && !shutdownActiveNow();
+    // min_power_toggle_minutes. While control is suspended (shutdown window
+    // or dashboard pause) "on" instead means switched on manually, and the
+    // service leaves it alone.
+    const pendingOff = kind === "on" && !controlSuspendedNow();
     chip.appendChild(document.createTextNode(pendingOff ? "pending off" : kind || "on"));
   } else {
     chip.classList.add("off");
@@ -821,68 +822,98 @@ function scheduledShutdownNow() {
   return (state.data?.shutdown_windows || []).some(([s, e]) =>
     s < e ? minute >= s && minute < e : minute >= s || minute < e);
 }
-/* Dashboard override ({shutdown, expires} epoch s, or null): replaces the
-   scheduled state until it expires at the next window boundary. Expiry is
+/* Dashboard override, or null. {shutdown, expires (epoch s)} replaces the
+   scheduled state until it expires at the next window boundary — expiry is
    re-checked against the browser clock so the display flips on time even
-   between data refreshes. */
+   between data refreshes. {pause: true} suspends control entirely until
+   resumed (no expiry). */
 function activeOverride() {
-  const ov = state.data?.shutdown_override;
-  return ov && ov.expires > Date.now() / 1000 ? ov : null;
+  const ov = state.data?.override;
+  if (!ov) return null;
+  if (ov.pause) return ov;
+  return ov.expires > Date.now() / 1000 ? ov : null;
+}
+function pausedNow() {
+  return !!activeOverride()?.pause;
 }
 function shutdownActiveNow() {
   const ov = activeOverride();
-  return ov ? ov.shutdown : scheduledShutdownNow();
+  return ov && !ov.pause ? ov.shutdown : scheduledShutdownNow();
+}
+/* Whether the control policy is driving the units right now (it isn't during
+   a shutdown window or a pause) — decides "pending off" vs manual "on". */
+function controlSuspendedNow() {
+  return pausedNow() || shutdownActiveNow();
 }
 let shutdownRenderedFor = null;
 function renderShutdown() {
   const el = $("#shutdown");
-  const windows = state.data?.shutdown_windows || [];
-  if (!windows.length) { el.hidden = true; return; }
+  if (!state.data) { el.hidden = true; return; }
+  const windows = state.data.shutdown_windows || [];
   const now = new Date();
   const minute = now.getHours() * 60 + now.getMinutes();
   if (shutdownRenderedFor === minute) return;
   shutdownRenderedFor = minute;
+  const paused = pausedNow();
   const override = activeOverride();
-  const active = shutdownActiveNow();
+  const active = !paused && shutdownActiveNow();
   const spans = windows.map(([s, e]) => `${fmtHM(s)}–${fmtHM(e)}`).join(", ");
-  let text = `Shutdown ${spans} · ` +
-    (active ? "🌙 active now — control paused" : "not active");
-  if (override) {
-    const d = new Date(override.expires * 1000);
-    text += ` · overridden until ${fmtHM(d.getHours() * 60 + d.getMinutes())}`;
+  let text = spans ? `Shutdown ${spans} · ` : "";
+  if (paused) {
+    text += "⏸ paused — manual control; recording continues";
+  } else {
+    text += active ? "🌙 active now — control paused" : "not active";
+    if (override) {
+      const d = new Date(override.expires * 1000);
+      text += ` · overridden until ${fmtHM(d.getHours() * 60 + d.getMinutes())}`;
+    }
   }
+  if (!spans && !paused) text = "Climate control active";
   $("#shutdownText").textContent = text;
-  $("#overrideBtn").textContent = active ? "Turn on" : "Turn off";
-  el.classList.toggle("active", active);
+  const ovBtn = $("#overrideBtn");
+  ovBtn.hidden = paused || !windows.length; // shutdown override needs windows
+  ovBtn.textContent = active ? "Turn on" : "Turn off";
+  $("#pauseBtn").textContent = paused ? "Resume" : "Pause";
+  el.classList.toggle("active", active || paused);
   el.hidden = false;
 }
 
-/* The button flips the effective state until the next window boundary: "Turn
-   on" during the night window resumes control (the schedule shuts things down
-   again at the next window start); "Turn off" during the day forces a
-   shutdown until the night window takes over. Pressing it again undoes the
-   override for the rest of the current period. */
-$("#overrideBtn").addEventListener("click", async () => {
-  const btn = $("#overrideBtn");
-  btn.disabled = true;
+async function postOverride(body) {
+  const buttons = [$("#overrideBtn"), $("#pauseBtn")];
+  for (const b of buttons) b.disabled = true;
   try {
     const res = await fetch("/api/override", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ shutdown: !shutdownActiveNow() }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    state.data.shutdown_override = (await res.json()).shutdown_override;
+    state.data.override = (await res.json()).override;
     shutdownRenderedFor = null;
     render(); // status chips ("pending off" vs manual) depend on the state too
   } catch (err) {
     const banner = $("#banner");
-    banner.textContent = `Could not set the shutdown override (${err.message}).`;
+    banner.textContent = `Could not set the override (${err.message}).`;
     banner.style.display = "block";
   } finally {
-    btn.disabled = false;
+    for (const b of buttons) b.disabled = false;
   }
-});
+}
+
+/* Turn on/off flips the effective shutdown state until the next window
+   boundary: "Turn on" during the night window resumes control (the schedule
+   shuts things down again at the next window start); "Turn off" during the
+   day forces a shutdown until the night window takes over. Pressing it again
+   undoes the override for the rest of the current period. */
+$("#overrideBtn").addEventListener("click", () =>
+  postOverride({ shutdown: !shutdownActiveNow() }));
+
+/* Pause suspends the service's control entirely — no power/mode/setpoint
+   commands, shutdown passes included — until Resume, while temperature and
+   weather recording carry on. For driving the aircons manually (or leaving
+   them off) and still monitoring. */
+$("#pauseBtn").addEventListener("click", () =>
+  postOverride({ pause: !pausedNow() }));
 
 function gapSeconds() {
   return Math.max(600, 3 * (state.data.bucket || state.data.sample_interval));

@@ -119,8 +119,13 @@ powers every unit off (bypassing `min_power_toggle_minutes`) and the control
 policy is suspended for the rest of the window. A unit switched on manually
 during the window is left on. The dashboard's "Turn on"/"Turn off" button
 (POST `/api/override`) overrides the shutdown state via
-`shutdown_override.json` (beside the config; webui writes it, the service
+`control_override.json` (beside the config; webui writes it, the service
 reads it every poll). The override expires at the next window boundary, so it
 flips the current period only — "on" overnight resumes control until the next
 scheduled shutdown; pressing again undoes it. Requires configured windows
-(the expiry is derived from them).
+(the expiry is derived from them). The same file/endpoint also carries the
+dashboard's "Pause" button (`{"pause": true}`): control is suspended entirely
+— no power/mode/setpoint commands, shutdown passes included — until "Resume"
+clears it (no auto-expiry), while history/weather recording continues, for
+running the units manually and still monitoring. Resuming inside a shutdown
+window runs the window's off pass (resume = back to schedule).
