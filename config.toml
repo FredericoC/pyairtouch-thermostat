@@ -12,8 +12,8 @@ log_file = "climate.log"      # service log file (relative to this config file),
                               # Set to "" to log to stdout only.
 
 [defaults]
-target_low = 18               # heat when a room drops below this
-target_high = 21              # cool when a room rises above this
+target_low = 23               # heat when a room drops below this
+target_high = 24.8            # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
 demand_persist_polls = 2      # a change in a room's demand must hold for this many
@@ -73,23 +73,23 @@ members = ["Study", "Living", "Master", "Bed 2"]
 
 # Per-room overrides of any [defaults] temperature value
 
-## Jeni prefers her room warmer. HRV will even it out eventually though.
-#[rooms."Bed 4"]
-#target_low = 23
-#target_high = 26
-#
-## Master & Bed 2 take a long time to warm and it's unnecessary
-## I’ve chosen the target temperature based on where the heating curve begins to plateau
-## HRV will even it out eventually
-#[rooms."Master"]
-#target_low = 22.2
-#target_high = 24.8
-#
-#[rooms."Bed 2"]
-#target_low = 22.2
-#target_high = 24.8
-#
-## Living pumps hot air into north side, so want it slightly lower as well
-#[rooms."Living"]
-#target_low = 22.6
-#target_high = 24.8
+# Jeni prefers her room warmer. HRV will even it out eventually though.
+[rooms."Bed 4"]
+target_low = 23
+target_high = 26
+
+# Master & Bed 2 take a long time to warm and it's unnecessary
+# I’ve chosen the target temperature based on where the heating curve begins to plateau
+# HRV will even it out eventually
+[rooms."Master"]
+target_low = 22.2
+target_high = 24.8
+
+[rooms."Bed 2"]
+target_low = 22.2
+target_high = 24.8
+
+# Living pumps hot air into north side, so want it slightly lower as well
+[rooms."Living"]
+target_low = 22.6
+target_high = 24.8
