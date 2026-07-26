@@ -12,8 +12,8 @@ log_file = "climate.log"      # service log file (relative to this config file),
                               # Set to "" to log to stdout only.
 
 [defaults]
-target_low = 18               # heat when a room drops below this
-target_high = 21              # cool when a room rises above this
+target_low = 21.6             # heat when a room drops below this
+target_high = 22.4              # cool when a room rises above this
 hysteresis = 0.4              # keep conditioning this far past the boundary before
                               # switching a unit off (prevents rapid on/off cycling)
 demand_persist_polls = 2      # a change in a room's demand must hold for this many
