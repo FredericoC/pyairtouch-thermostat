@@ -297,6 +297,7 @@ def read_control_override(path: Path) -> dict | None:
 class RoomState:
     running_for: AcMode | None = None  # why *we* have the unit on (HEAT or COOL)
     demand: AcMode | None = None  # debounced demand (drives mode and power)
+    demand_temp: float | None = None  # the reading that latched the demand
     demand_candidate: AcMode | None = None  # raw demand awaiting confirmation
     demand_streak: int = 0  # consecutive polls the candidate has held
 
@@ -343,7 +344,10 @@ class GroupController:
         # pass acts on them (an adopted running unit must not be switched off
         # as "satisfied" just because its demand hasn't been confirmed yet).
         for name in self._group.members:
-            self._state.rooms[name].demand = self._raw_demand(name)
+            room_state = self._state.rooms[name]
+            room_state.demand = self._raw_demand(name)
+            if room_state.demand is not None:
+                room_state.demand_temp = self._units[name].current_temperature
         # compressor_change stays None: we don't know when the outdoor unit
         # last started or stopped, so the first pass isn't held back.
         self._state.compressor_on = any(
@@ -404,6 +408,9 @@ class GroupController:
                 room_state.demand_streak = 1
             if room_state.demand_streak >= self._cfg.demand_persist_polls:
                 room_state.demand = raw
+                room_state.demand_temp = (
+                    self._units[name].current_temperature if raw else None
+                )
                 room_state.demand_candidate = None
                 room_state.demand_streak = 0
             elif room_state.demand_streak == 1:
@@ -661,9 +668,20 @@ class GroupController:
             if self._cfg.manage_setpoints:
                 await self._apply_setpoint(name, mode)
             if mode is AcMode.HEAT:
-                reason = f"{temp:.1f}°C is below {room.target_low:.1f}°C"
+                side, bound, breached = "below", room.target_low, temp < room.target_low
             else:
-                reason = f"{temp:.1f}°C is above {room.target_high:.1f}°C"
+                side, bound, breached = "above", room.target_high, temp > room.target_high
+            if breached:
+                reason = f"{temp:.1f}°C is {side} {bound:.1f}°C"
+            elif room_state.demand_temp is not None:
+                # Demand latched a while ago (debounce / anti-short-cycle hold)
+                # and the room has since drifted back inside the range.
+                reason = (
+                    f"demand latched at {room_state.demand_temp:.1f}°C, "
+                    f"{side} {bound:.1f}°C (now {temp:.1f}°C)"
+                )
+            else:
+                reason = f"demand latched earlier, {side} {bound:.1f}°C (now {temp:.1f}°C)"
             await self._send(
                 f"[{self._group.name}] {name}: power → ON, "
                 f"{mode.name.lower()}ing ({reason})",
