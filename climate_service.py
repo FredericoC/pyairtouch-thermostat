@@ -64,6 +64,8 @@ ON_STATES = frozenset({AcPowerState.ON, AcPowerState.ON_AWAY, AcPowerState.SLEEP
 
 STATUS_HEARTBEAT = 15 * 60  # seconds between full status logs when nothing changes
 
+COMMAND_GAP = 0.5  # seconds between consecutive commands, gentle on the console
+
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
@@ -266,7 +268,7 @@ def load_config(path: Path) -> Config:
     )
 
 
-def read_control_override(path: Path) -> dict | None:
+def read_control_override(path: Path, now: float | None = None) -> dict | None:
     """The dashboard's control override, or None if absent/expired/invalid.
 
     Two forms. {"pause": true}: control is fully suspended — no commands at
@@ -284,13 +286,41 @@ def read_control_override(path: Path) -> dict | None:
         override = {"shutdown": bool(raw["shutdown"]), "expires": float(raw["expires"])}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
-    if time.time() >= override["expires"]:
+    if (time.time() if now is None else now) >= override["expires"]:
         return None
     return override
 
 
 # ---------------------------------------------------------------------------
 # Control logic
+
+
+def demand_setpoint(room: RoomConfig, mode: AcMode, hysteresis: float, boost: float) -> float:
+    """The whole-degree setpoint commanded while a room demands conditioning.
+
+    Rounded towards the demand side: up for heat, down for cool, so the
+    unit's internal thermostat can't idle short of our power-off threshold
+    (target_low/high ± hysteresis). `boost` pushes the setpoint further past
+    the threshold: the unit modulates on its own return-air sensor, which
+    reads warm before the room sensor reaches target, so without the boost
+    it tapers to a trickle short of temp. We power off on the room sensor,
+    so the boost can't overshoot the room.
+    """
+    if mode is AcMode.HEAT:
+        return float(math.ceil(room.target_low + hysteresis + boost))
+    return float(math.floor(room.target_high - hysteresis - boost))
+
+
+def idle_setpoint(mode: AcMode, temp: float) -> float:
+    """The parked setpoint while the power-toggle hold keeps a satisfied unit on.
+
+    The room temperature rounded down for heat, up for cool, so the unit's
+    own thermostat idles instead of pushing more heat/cool into an
+    already-satisfied room.
+    """
+    if mode is AcMode.HEAT:
+        return float(math.floor(temp))
+    return float(math.ceil(temp))
 
 
 @dataclass
@@ -511,38 +541,22 @@ class GroupController:
         _LOGGER.info(">> CMD %s", description)
         await coro
         # Small gap between consecutive commands to be gentle on the console.
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(COMMAND_GAP)
 
     async def _apply_setpoint(self, name: str, mode: AcMode) -> None:
-        unit = self._units[name]
+        # Whole-degree setpoints only (fractional values may not be honoured
+        # by the units) — see demand_setpoint for the rounding/boost rationale.
         room = self._cfg.room(name)
-        # Whole-degree setpoints only (fractional values may not be honoured by
-        # the units). Round towards the demand side: up for heat, down for cool,
-        # so the unit's internal thermostat can't idle short of our power-off
-        # threshold (target_low/high ± hysteresis). setpoint_boost pushes the
-        # setpoint further past the threshold: the unit modulates on its own
-        # return-air sensor, which reads warm before the room sensor reaches
-        # target, so without the boost it tapers to a trickle short of temp.
-        # We power off on the room sensor, so the boost can't overheat the room.
-        boost = self._cfg.setpoint_boost
-        if mode is AcMode.HEAT:
-            target = float(math.ceil(room.target_low + self._cfg.hysteresis + boost))
-        else:
-            target = float(math.floor(room.target_high - self._cfg.hysteresis - boost))
+        target = demand_setpoint(room, mode, self._cfg.hysteresis, self._cfg.setpoint_boost)
         await self._align_mode(name, mode)
         await self._send_setpoint(name, target)
 
     async def _apply_idle_setpoint(self, name: str, mode: AcMode, temp: float) -> None:
         # The room is satisfied but the compressor hold is keeping the last
-        # running unit on. Park the setpoint at the room temperature — rounded down
-        # for heat, up for cool — so the unit's own thermostat idles instead
-        # of pushing more heat/cool into an already-satisfied room. The normal
-        # boosted setpoint is restored on the next power-on (or if demand
-        # returns while the unit is still on).
-        if mode is AcMode.HEAT:
-            target = float(math.floor(temp))
-        else:
-            target = float(math.ceil(temp))
+        # running unit on — see idle_setpoint. The normal boosted setpoint is
+        # restored on the next power-on (or if demand returns while the unit
+        # is still on).
+        target = idle_setpoint(mode, temp)
         await self._align_mode(name, mode)
         await self._send_setpoint(name, target, note=" (idling out power-toggle hold)")
 
@@ -968,11 +982,17 @@ class ClimateService:
     def request_stop(self) -> None:
         self._stop.set()
 
-    def _override_state(self) -> tuple[dict | None, bool, bool]:
+    def _override_state(
+        self, local_now: datetime | None = None
+    ) -> tuple[dict | None, bool, bool]:
         """This moment's (dashboard override, paused, effective shutdown)."""
-        override = read_control_override(self._cfg.override_path)
+        if local_now is None:
+            local_now = datetime.now()
+        override = read_control_override(
+            self._cfg.override_path, now=local_now.timestamp()
+        )
         paused = bool(override and override.get("pause"))
-        shutdown = self._cfg.shutdown_active(datetime.now())
+        shutdown = self._cfg.shutdown_active(local_now)
         if override is not None and not paused:
             shutdown = override["shutdown"]
         return override, paused, shutdown

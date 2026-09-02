@@ -260,6 +260,30 @@ sudo systemctl daemon-reload
 `After=network-online.target` delays startup at boot until the network is up.
 The dashboard is then at `http://<pi-hostname>:8765`.
 
+## Tests and replay
+
+```sh
+pip install -r requirements-dev.txt
+pytest                          # Python: control policy, service loop, webui (~180 tests)
+```
+
+`replay.py` feeds recorded temperatures from `history.db` through the real
+control policy offline — regression-test the controller against real data,
+or compare what alternate tunings would have decided:
+
+```sh
+python replay.py --db history.db --from 2026-07-12 --to 2026-07-15
+python replay.py --db history.db --variant "hyst6:hysteresis=0.6" \
+                 --variant "dwell90:min_mode_dwell_minutes=90"
+```
+
+Caveat (also printed by the tool): recorded temperatures are the outcome of
+the config that was live at the time, so variant replays show per-timestep
+decisions, not predicted temperatures. A committed 3-day fixture drives
+`tests/test_replay_regression.py`, which locks the decision sequence against
+refactors; regenerate the golden file via `regenerate()` in that module when
+a behaviour change is intentional.
+
 ## TODO
 
 - Plot outside temperature and solar radiation (W/m²) from the Ecowitt
