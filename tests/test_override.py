@@ -99,9 +99,19 @@ class TestRestartMidWindow:
         )
         assert ClimateService(cfg)._was_shutdown  # off pass assumed already run
 
-    def test_start_outside_window(self, tmp_path):
+    def test_no_windows_never_seeds_shutdown(self, tmp_path):
         cfg = make_config(
             shutdown_windows=(),
             override_path=tmp_path / "control_override.json",
         )
+        assert not ClimateService(cfg)._was_shutdown
+
+    def test_paused_at_start_does_not_seed_shutdown(self, tmp_path):
+        # Paused inside a window: _was_shutdown stays False so that resuming
+        # runs the off pass (resume = back to schedule).
+        cfg = make_config(
+            shutdown_windows=((0, 1440),),
+            override_path=tmp_path / "control_override.json",
+        )
+        write_override(tmp_path, {"pause": True})
         assert not ClimateService(cfg)._was_shutdown

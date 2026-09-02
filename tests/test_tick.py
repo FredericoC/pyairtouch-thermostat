@@ -66,11 +66,20 @@ class TestPowerCommands:
 
 
 class TestCompressorGating:
-    async def test_first_pass_never_held(self):
-        # compressor_change is None after adoption: unknown history, no hold.
-        ctl, _, commands = make_group(make_config(), {"A": 20.0, "B": 22.0})
-        await ctl.tick(now=0.0)
-        assert ("A", "power", AcPowerControl.TURN_ON) in commands
+    async def test_unknown_compressor_history_is_never_held(self):
+        # Same satisfied-last-unit scenario as test_last_unit_off_is_held_and_
+        # parked, but compressor_change is None (fresh adoption): we don't know
+        # when the outdoor unit last toggled, so no hold applies.
+        ctl, units, commands = make_group(
+            make_config(),
+            {"A": 22.6, "B": 22.0},
+            modes={"A": AcMode.HEAT},
+            powers={"A": AcPowerState.ON},
+        )
+        assert ctl._state.compressor_change is None
+        await ctl.tick(now=1000.0)
+        assert ("A", "power", AcPowerControl.TURN_OFF) in commands
+        assert ("A", "setpoint", 22.0) not in commands  # not parked
 
     async def test_peer_toggle_is_free_while_compressor_runs(self):
         ctl, units, commands = make_group(
@@ -155,6 +164,34 @@ class TestEnforceShutdown:
         )
         await ctl.enforce_shutdown(now=0.0)
         assert commands == []
+
+
+class TestManageSetpointsOff:
+    async def test_power_only_no_setpoint_or_member_mode(self):
+        # Without setpoint management the service only toggles power; member
+        # mode alignment exists to make setpoints land on the right mode, so
+        # it is skipped too. The master's mode still drives the group.
+        ctl, units, commands = make_group(
+            make_config(manage_setpoints=False),
+            {"A": 22.0, "B": 20.0},
+            modes={"A": AcMode.COOL, "B": AcMode.COOL},
+        )
+        await ctl.tick(now=0.0)
+        assert commands == [
+            ("A", "mode", AcMode.HEAT),
+            ("B", "power", AcPowerControl.TURN_ON),
+        ]
+
+    async def test_pending_off_not_parked(self):
+        ctl, units, commands = make_group(
+            make_config(manage_setpoints=False),
+            {"A": 22.6, "B": 22.0},
+            modes={"A": AcMode.HEAT},
+            powers={"A": AcPowerState.ON},
+        )
+        ctl._state.compressor_change = 970.0
+        await ctl.tick(now=1000.0)
+        assert commands == []  # held on, but no idle setpoint sent
 
 
 class TestDryRun:
