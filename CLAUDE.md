@@ -49,7 +49,10 @@ Climate control for a Polyaire AirTouch 5 HVAC controller, using the
   `airtouch-climate.service`, `airtouch-webui.service` — systemd equivalents
   (Raspberry Pi OS / Linux, paths assume `/home/pi/pyairtouch`).
 
-There are no tests, linters, or build steps.
+Tests: `.venv/bin/python -m pytest -q` (see `tests/`; `tests/test_replay_regression.py`
+replays a committed 3-day fixture through the real policy and diffs the
+decision log against a golden file — regenerate it deliberately when policy
+behaviour changes). No linters or build steps.
 
 ## Setup and run
 
@@ -88,16 +91,31 @@ powered on/off
 (`ac.set_power(...)`) purely on their own room's demand, and when
 `manage_setpoints` is on each also gets whole-degree setpoint commands
 (`ac.set_target_temperature(...)`, rounded toward the demand side and pushed
-`setpoint_boost` °C past the power-off threshold — units modulate on their own
-return-air sensor and taper off before the room sensor reaches target;
-power-off is still decided by the room sensor, so the boost can't overshoot
-the room).
+`heat_setpoint_boost` / `cool_setpoint_boost` °C past the power-off
+threshold). The boost matters for heating only: the unit's return-air intake
+at the ceiling reads warm before the room sensor does, so a heating unit
+tapers early without it. In cooling the intake reads *warmer* than the room,
+the unit never tapers early (recorded data: the room falls at the same rate
+with the setpoint parked above it as with it boosted below), and a boost only
+drives fan/compressor to maximum — so `cool_setpoint_boost` is 0. Power-off is
+always decided by the room sensor. Fan speed is set on power-on per mode
+(`heat_fan_speed` auto, `cool_fan_speed` medium; `"keep"` = don't touch) and
+never re-asserted mid-run; the console remembers a unit's fan speed across
+power cycles, which is why the service owns it for both modes once it sets
+one.
 
 ## Control policy (climate_service.py)
 
-Per-room on/off thermostat with hysteresis, plus sticky group mode selection:
-a group flips heat<->cool only when no room demands the current mode, a room
-demands the opposite mode, and `min_mode_dwell_minutes` has passed. Room
+Per-room on/off thermostat with per-mode hysteresis (`heat_hysteresis` 0.4,
+`cool_hysteresis` 1.2 — cooling pulls the room sensor down in minutes and the
+sun pushes it straight back, so the cooling band must be wider or units run
+for 8 minutes every 25; legacy `hysteresis` sets both), plus sticky group mode
+selection: a group flips heat<->cool only when no room demands the current
+mode, a room demands the opposite mode, and `min_mode_dwell_minutes` has
+passed. `heating = false` ([defaults] or per room) is the summer switch: the
+room never demands heat, and a group with no heating rooms always selects COOL
+(including overriding a master left in HEAT at startup); the config validator
+then only requires the cooling-off threshold to stay above `target_low`. Room
 demand is debounced (`demand_persist_polls`, default 2): a change must hold
 for that many consecutive polls before it drives mode or power — the console
 occasionally emits a single glitched sample (several rooms reading the same
@@ -108,8 +126,12 @@ outdoor unit: the hold applies only to toggles that would start or stop the
 compressor (the group's first unit on / last unit off) — toggling a unit
 while peers keep the compressor running is free. While that hold
 keeps a satisfied unit on ("pending off"), its setpoint is parked at the room
-temperature (floor for heat, ceil for cool) so it idles instead of continuing
-to condition the room — the boosted setpoint returns on the next run.
+temperature (floor for heat, ceil for cool) and its fan dropped to
+`pending_off_fan_speed` (quiet; LOW on units without QUIET) so it is as quiet
+as possible — in cooling the parked setpoint alone changes nothing, the fan
+is the lever that works. The boosted setpoint and the mode's fan speed return
+when the unit next runs (`RoomState.fan_parked`; if the mode's fan speed is
+"keep", the pre-drop speed is restored instead).
 All thresholds live in `config.toml`. Temperatures can be `None` — handle that
 when reading `current_temperature`.
 

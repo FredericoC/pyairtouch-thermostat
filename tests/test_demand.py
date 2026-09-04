@@ -2,6 +2,7 @@
 
 from pyairtouch import AcMode
 
+from climate_service import RoomConfig
 from conftest import make_config, make_group
 
 
@@ -104,3 +105,39 @@ class TestDebounce:
         ctl._update_demands()
         assert room.demand is None
         assert room.demand_temp is None
+
+
+class TestPerModeHysteresis:
+    def test_cool_latch_uses_cool_hysteresis(self):
+        cfg = make_config(heat_hysteresis=0.4, cool_hysteresis=1.2)
+        ctl, _, _ = make_group(cfg, {"A": 23.0, "B": 22.0})  # 24 - 1.2 = 22.8
+        ctl._state.rooms["A"].running_for = AcMode.COOL
+        assert ctl._raw_demand("A") is AcMode.COOL
+        ctl._units["A"].current_temperature = 22.7
+        assert ctl._raw_demand("A") is None
+
+    def test_heat_latch_unaffected_by_cool_hysteresis(self):
+        cfg = make_config(heat_hysteresis=0.4, cool_hysteresis=1.2)
+        ctl, _, _ = make_group(cfg, {"A": 21.5, "B": 22.0})  # above 21.4
+        ctl._state.rooms["A"].running_for = AcMode.HEAT
+        assert ctl._raw_demand("A") is None
+
+
+class TestHeatingOff:
+    def cfg(self):
+        return make_config(
+            rooms={"A": RoomConfig(21.0, 24.0, heating=False), "B": RoomConfig(21.0, 24.0)}
+        )
+
+    def test_cold_room_demands_nothing(self):
+        ctl, _, _ = make_group(self.cfg(), {"A": 15.0, "B": 22.0})
+        assert ctl._raw_demand("A") is None
+        assert ctl._state.rooms["A"].demand is None  # seeded at adoption too
+
+    def test_cold_room_with_heating_still_demands(self):
+        ctl, _, _ = make_group(self.cfg(), {"A": 15.0, "B": 15.0})
+        assert ctl._raw_demand("B") is AcMode.HEAT
+
+    def test_cooling_demand_unchanged(self):
+        ctl, _, _ = make_group(self.cfg(), {"A": 25.0, "B": 22.0})
+        assert ctl._raw_demand("A") is AcMode.COOL

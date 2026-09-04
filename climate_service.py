@@ -19,7 +19,16 @@ decisions, so a single glitched console sample can't flip a group's mode
 Anti-short-cycling (`min_power_toggle_minutes`) protects each group's shared
 outdoor unit: its compressor runs whenever any member is on, so only toggles
 that would start or stop the compressor are held back — turning one unit
-on/off while its peers keep the compressor running is free.
+on/off while its peers keep the compressor running is free. A satisfied unit
+the hold keeps on gets its setpoint parked and its fan dropped to
+`pending_off_fan_speed` so it is as quiet as possible in the meantime.
+
+Heating and cooling are tuned separately: `heat_hysteresis`/`cool_hysteresis`
+(how far past the boundary a run continues — cooling wants a wider band
+because the sun re-heats a room within minutes), `heat_setpoint_boost`/
+`cool_setpoint_boost` and `heat_fan_speed`/`cool_fan_speed`. `heating = false`
+(globally or per room) turns heating off for the summer: such rooms never
+demand heat and a group with no heating rooms stays in COOL.
 
 Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
 unit off for night or away periods: when a window starts, a single off pass
@@ -56,7 +65,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pyairtouch
-from pyairtouch import AcMode, AcPowerControl, AcPowerState, AirConditioner
+from pyairtouch import AcFanSpeed, AcMode, AcPowerControl, AcPowerState, AirConditioner
 
 _LOGGER = logging.getLogger("climate")
 
@@ -78,6 +87,7 @@ LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 class RoomConfig:
     target_low: float
     target_high: float
+    heating: bool = True  # False: never demand heat (target_low is display only)
 
 
 @dataclass(frozen=True)
@@ -92,12 +102,29 @@ class Config:
     host: str
     poll_interval: float
     dry_run: bool
-    hysteresis: float
+    # Heating and cooling have very different dynamics here (heat slews
+    # slowly; cooling pulls the room sensor down within minutes and the sun
+    # pushes it straight back), so the off-threshold margin is per mode.
+    heat_hysteresis: float
+    cool_hysteresis: float
     demand_persist_polls: int  # consecutive polls before a demand change is real
     min_mode_dwell: float  # seconds
     min_power_toggle: float  # seconds
     manage_setpoints: bool
-    setpoint_boost: float  # °C past the off threshold to push unit setpoints
+    # °C past the off threshold to push unit setpoints, per mode. Heating
+    # needs it (the unit's return-air sensor reads warm and it tapers early);
+    # cooling doesn't — the unit keeps cooling regardless, so the boost only
+    # adds fan speed, draft and undershoot; set cool_setpoint_boost = 0.
+    heat_setpoint_boost: float
+    cool_setpoint_boost: float
+    # Fan speed pushed when a unit is switched on for a mode (None = never
+    # touch that mode's fan speed), and the speed a satisfied unit drops to
+    # while the compressor hold keeps it on (None = no drop). The console
+    # remembers a unit's fan speed across power cycles, so once the service
+    # sets one it re-asserts the mode's speed on every power-on.
+    heat_fan_speed: AcFanSpeed | None
+    cool_fan_speed: AcFanSpeed | None
+    pending_off_fan_speed: AcFanSpeed | None
     history_path: Path | None  # None = history recording disabled
     history_interval: float  # seconds
     weather_port: int | None  # None = Ecowitt weather listener disabled
@@ -107,6 +134,15 @@ class Config:
     override_path: Path  # dashboard's shutdown override file (may not exist)
     groups: tuple[GroupConfig, ...]
     rooms: dict[str, RoomConfig]
+
+    def hysteresis(self, mode: AcMode) -> float:
+        return self.heat_hysteresis if mode is AcMode.HEAT else self.cool_hysteresis
+
+    def setpoint_boost(self, mode: AcMode) -> float:
+        return self.heat_setpoint_boost if mode is AcMode.HEAT else self.cool_setpoint_boost
+
+    def fan_speed(self, mode: AcMode) -> AcFanSpeed | None:
+        return self.heat_fan_speed if mode is AcMode.HEAT else self.cool_fan_speed
 
     def room(self, name: str) -> RoomConfig:
         return self.rooms[name]
@@ -166,6 +202,24 @@ def _parse_shutdown_window(spec: str) -> tuple[int, int]:
     return start, end
 
 
+def _parse_fan_speed(
+    key: str, value: object, *, none_word: str
+) -> AcFanSpeed | None:
+    """A `*_fan_speed` config value: an AcFanSpeed name, or `none_word` for None."""
+    if not isinstance(value, str):
+        raise ValueError(f"[defaults] {key} must be a string")
+    word = value.strip().lower()
+    if word == none_word:
+        return None
+    try:
+        return AcFanSpeed[word.upper()]
+    except KeyError:
+        names = ", ".join(s.name.lower() for s in AcFanSpeed)
+        raise ValueError(
+            f"[defaults] {key} = {value!r}: expected one of {names} or {none_word!r}"
+        ) from None
+
+
 def load_config(path: Path) -> Config:
     with path.open("rb") as f:
         raw = tomllib.load(f)
@@ -174,6 +228,7 @@ def load_config(path: Path) -> Config:
     defaults = raw.get("defaults", {})
     default_low = float(defaults.get("target_low", 21.0))
     default_high = float(defaults.get("target_high", 23.5))
+    default_heating = bool(defaults.get("heating", True))
 
     groups = tuple(
         GroupConfig(name=name, master=g["master"], members=tuple(g["members"]))
@@ -194,24 +249,49 @@ def load_config(path: Path) -> Config:
             rooms[member] = RoomConfig(
                 target_low=float(o.get("target_low", default_low)),
                 target_high=float(o.get("target_high", default_high)),
+                heating=bool(o.get("heating", default_heating)),
             )
     for room_cfg_name in overrides:
         if room_cfg_name not in rooms:
             raise ValueError(
                 f"[rooms.{room_cfg_name!r}] does not match any group member"
             )
+    # `hysteresis` / `setpoint_boost` set both modes; the per-mode keys win.
     hysteresis = float(defaults.get("hysteresis", 0.4))
+    heat_hysteresis = float(defaults.get("heat_hysteresis", hysteresis))
+    cool_hysteresis = float(defaults.get("cool_hysteresis", hysteresis))
+    if heat_hysteresis < 0 or cool_hysteresis < 0:
+        raise ValueError("[defaults] hysteresis values must be >= 0")
     for name, cfg in rooms.items():
         if cfg.target_low >= cfg.target_high:
             raise ValueError(f"room {name!r}: target_low must be < target_high")
-        if cfg.target_high - cfg.target_low <= 2 * hysteresis:
+        cool_off = cfg.target_high - cool_hysteresis
+        # With heating off the heating-off threshold never applies; the
+        # cooling-off threshold only has to stay above the bottom of the range.
+        heat_off = cfg.target_low + (heat_hysteresis if cfg.heating else 0.0)
+        if cool_off <= heat_off:
             raise ValueError(
                 f"room {name!r}: range {cfg.target_low}–{cfg.target_high} is too "
-                f"narrow — it must be wider than 2 × hysteresis "
-                f"({2 * hysteresis}), or the heating-off threshold "
-                f"({cfg.target_low + hysteresis}) would overlap the cooling-off "
-                f"threshold ({cfg.target_high - hysteresis})"
+                f"narrow for the hysteresis — the cooling-off threshold "
+                f"({cool_off:.1f}) must stay above the "
+                f"{'heating-off threshold' if cfg.heating else 'bottom of the range'} "
+                f"({heat_off:.1f}); widen the range or reduce "
+                f"{'heat_hysteresis/cool_hysteresis' if cfg.heating else 'cool_hysteresis'}"
             )
+    boost = float(defaults.get("setpoint_boost", 0.0))
+    heat_setpoint_boost = float(defaults.get("heat_setpoint_boost", boost))
+    cool_setpoint_boost = float(defaults.get("cool_setpoint_boost", boost))
+    heat_fan_speed = _parse_fan_speed(
+        "heat_fan_speed", defaults.get("heat_fan_speed", "auto"), none_word="keep"
+    )
+    cool_fan_speed = _parse_fan_speed(
+        "cool_fan_speed", defaults.get("cool_fan_speed", "medium"), none_word="keep"
+    )
+    pending_off_fan_speed = _parse_fan_speed(
+        "pending_off_fan_speed",
+        defaults.get("pending_off_fan_speed", "quiet"),
+        none_word="off",
+    )
 
     shutdown = raw.get("shutdown", {})
     shutdown_windows: tuple[tuple[int, int], ...] = ()
@@ -250,12 +330,17 @@ def load_config(path: Path) -> Config:
         host=service.get("host", ""),
         poll_interval=float(service.get("poll_interval_seconds", 30)),
         dry_run=bool(service.get("dry_run", False)),
-        hysteresis=hysteresis,
+        heat_hysteresis=heat_hysteresis,
+        cool_hysteresis=cool_hysteresis,
         demand_persist_polls=max(1, int(defaults.get("demand_persist_polls", 2))),
         min_mode_dwell=float(defaults.get("min_mode_dwell_minutes", 60)) * 60,
         min_power_toggle=float(defaults.get("min_power_toggle_minutes", 10)) * 60,
         manage_setpoints=bool(defaults.get("manage_setpoints", True)),
-        setpoint_boost=float(defaults.get("setpoint_boost", 0.0)),
+        heat_setpoint_boost=heat_setpoint_boost,
+        cool_setpoint_boost=cool_setpoint_boost,
+        heat_fan_speed=heat_fan_speed,
+        cool_fan_speed=cool_fan_speed,
+        pending_off_fan_speed=pending_off_fan_speed,
         history_path=history_path,
         history_interval=float(history.get("interval_seconds", 60)),
         weather_port=weather_port,
@@ -330,6 +415,8 @@ class RoomState:
     demand_temp: float | None = None  # the reading that latched the demand
     demand_candidate: AcMode | None = None  # raw demand awaiting confirmation
     demand_streak: int = 0  # consecutive polls the candidate has held
+    fan_parked: bool = False  # fan dropped for pending-off; restore when it runs again
+    fan_before_park: AcFanSpeed | None = None  # what to restore when the mode has no fan speed
 
 
 @dataclass
@@ -360,6 +447,10 @@ class GroupController:
             rooms={name: RoomState() for name in group.members}
         )
         self._commanded: dict[str, bool] = {}  # power sent this pass, name -> on
+        # A group where no room may heat is cooling-only: it never selects
+        # HEAT, whatever the master was left in.
+        self._can_heat = any(cfg.room(n).heating for n in group.members)
+        self._fan_warned: set[str] = set()  # units warned about unsupported fan speeds
         self._adopt_current_state()
 
     def _adopt_current_state(self) -> None:
@@ -367,6 +458,8 @@ class GroupController:
         master = self._units[self._group.master]
         if master.selected_mode in (AcMode.HEAT, AcMode.COOL):
             self._state.desired_mode = master.selected_mode
+        if not self._can_heat:
+            self._state.desired_mode = AcMode.COOL
         for name, unit in self._units.items():
             if unit.power_state in ON_STATES and self._state.desired_mode:
                 self._state.rooms[name].running_for = self._state.desired_mode
@@ -390,9 +483,10 @@ class GroupController:
         """This poll's instantaneous demand for a room, with hysteresis.
 
         A room starts demanding when it crosses its range boundary and keeps
-        demanding until it has moved `hysteresis` past the boundary. The two
-        thresholds can't overlap (the config loader enforces a wide-enough
-        range), so at most one mode is demanded.
+        demanding until it has moved the mode's hysteresis past the boundary.
+        The two thresholds can't overlap (the config loader enforces a
+        wide-enough range), so at most one mode is demanded. A room with
+        heating off never demands heat, however cold it gets.
         """
         unit = self._units[name]
         temp = unit.current_temperature
@@ -400,10 +494,14 @@ class GroupController:
             return None
         room = self._cfg.room(name)
         running = self._state.rooms[name].running_for
-        low = room.target_low + (self._cfg.hysteresis if running is AcMode.HEAT else 0.0)
+        low = room.target_low + (
+            self._cfg.heat_hysteresis if running is AcMode.HEAT else 0.0
+        )
         if temp < low:
-            return AcMode.HEAT
-        high = room.target_high - (self._cfg.hysteresis if running is AcMode.COOL else 0.0)
+            return AcMode.HEAT if room.heating else None
+        high = room.target_high - (
+            self._cfg.cool_hysteresis if running is AcMode.COOL else 0.0
+        )
         if temp > high:
             return AcMode.COOL
         return None
@@ -498,8 +596,12 @@ class GroupController:
         if state.desired_mode is None:
             # First run with the master in a non-heat/cool mode: pick whichever
             # side has demand (heat wins a tie — this is a passive house, ties
-            # are rare and heating is the safer default).
-            state.desired_mode = AcMode.COOL if cool_rooms and not heat_rooms else AcMode.HEAT
+            # are rare and heating is the safer default). A cooling-only group
+            # always picks COOL.
+            if not self._can_heat or (cool_rooms and not heat_rooms):
+                state.desired_mode = AcMode.COOL
+            else:
+                state.desired_mode = AcMode.HEAT
             state.last_mode_change = now
             return state.desired_mode
 
@@ -547,7 +649,9 @@ class GroupController:
         # Whole-degree setpoints only (fractional values may not be honoured
         # by the units) — see demand_setpoint for the rounding/boost rationale.
         room = self._cfg.room(name)
-        target = demand_setpoint(room, mode, self._cfg.hysteresis, self._cfg.setpoint_boost)
+        target = demand_setpoint(
+            room, mode, self._cfg.hysteresis(mode), self._cfg.setpoint_boost(mode)
+        )
         await self._align_mode(name, mode)
         await self._send_setpoint(name, target)
 
@@ -559,6 +663,67 @@ class GroupController:
         target = idle_setpoint(mode, temp)
         await self._align_mode(name, mode)
         await self._send_setpoint(name, target, note=" (idling out power-toggle hold)")
+
+    async def _apply_run_fan(self, name: str, mode: AcMode) -> None:
+        """Assert the mode's configured fan speed as a unit starts running.
+
+        Also called while a unit keeps running after a pending-off drop
+        (demand came back before the hold let it switch off). Never sent
+        otherwise, so a fan speed changed on the wall panel mid-run sticks.
+        """
+        room_state = self._state.rooms[name]
+        speed = self._cfg.fan_speed(mode)
+        if speed is None and room_state.fan_parked:
+            # No configured speed for this mode ("keep"): put back whatever
+            # the unit had before the pending-off drop.
+            speed = room_state.fan_before_park
+        await self._apply_fan(name, speed, note="")
+        room_state.fan_parked = False
+        room_state.fan_before_park = None
+
+    async def _apply_pending_off_fan(self, name: str) -> None:
+        """Quieten a satisfied unit that the compressor hold keeps on.
+
+        In cooling the parked setpoint changes nothing — the unit keeps
+        cooling on its own return-air reading — so the fan is the one lever
+        that actually reduces both conditioning and noise.
+        """
+        speed = self._cfg.pending_off_fan_speed
+        if speed is None:
+            return
+        room_state = self._state.rooms[name]
+        if not room_state.fan_parked:
+            room_state.fan_before_park = self._units[name].selected_fan_speed
+            room_state.fan_parked = True
+        await self._apply_fan(name, speed, note=" (idling out power-toggle hold)")
+
+    async def _apply_fan(self, name: str, speed: AcFanSpeed | None, *, note: str) -> None:
+        if speed is None:
+            return
+        unit = self._units[name]
+        supported = unit.supported_fan_speeds
+        if speed not in supported:
+            # QUIET is the usual gap; LOW is the next quietest.
+            if speed is AcFanSpeed.QUIET and AcFanSpeed.LOW in supported:
+                speed = AcFanSpeed.LOW
+            else:
+                if name not in self._fan_warned:
+                    self._fan_warned.add(name)
+                    _LOGGER.warning(
+                        "[%s] %s does not support fan speed %s (supports %s); "
+                        "leaving its fan speed alone",
+                        self._group.name, name, speed.name,
+                        ", ".join(s.name for s in supported),
+                    )
+                return
+        if unit.selected_fan_speed is speed:
+            return
+        current = unit.selected_fan_speed
+        await self._send(
+            f"[{self._group.name}] {name}: fan "
+            f"{current.name if current else '?'} → {speed.name}{note}",
+            unit.set_fan_speed(speed),
+        )
 
     async def _align_mode(self, name: str, mode: AcMode) -> None:
         # Setpoint commands apply to the unit's currently-selected mode, so a
@@ -657,8 +822,13 @@ class GroupController:
             room_state.running_for = None
 
         if should_run == is_on:
-            if should_run and self._cfg.manage_setpoints:
-                await self._apply_setpoint(name, mode)
+            if should_run:
+                if self._cfg.manage_setpoints:
+                    await self._apply_setpoint(name, mode)
+                if room_state.fan_parked:
+                    # Demand returned while the hold still had it on: undo
+                    # the pending-off fan drop.
+                    await self._apply_run_fan(name, mode)
             return
 
         # Anti short-cycling protects the group's shared outdoor unit, not the
@@ -672,15 +842,19 @@ class GroupController:
             and now - self._state.compressor_change < self._cfg.min_power_toggle
         ):
             # Too soon. If the unit is pending off, stop it heating/cooling
-            # the already-satisfied room in the meantime.
-            if is_on and self._cfg.manage_setpoints:
-                await self._apply_idle_setpoint(name, mode, temp)
+            # the already-satisfied room in the meantime, and make it as
+            # quiet as possible.
+            if is_on:
+                if self._cfg.manage_setpoints:
+                    await self._apply_idle_setpoint(name, mode, temp)
+                await self._apply_pending_off_fan(name)
             return
 
         room = self._cfg.room(name)
         if should_run:
             if self._cfg.manage_setpoints:
                 await self._apply_setpoint(name, mode)
+            await self._apply_run_fan(name, mode)
             if mode is AcMode.HEAT:
                 side, bound, breached = "below", room.target_low, temp < room.target_low
             else:
@@ -789,9 +963,9 @@ class GroupController:
             elif on and running_for:
                 activity = f"{running_for.name.lower()}ing"
                 if running_for is AcMode.HEAT:
-                    threshold = room.target_low + self._cfg.hysteresis
+                    threshold = room.target_low + self._cfg.heat_hysteresis
                 else:
-                    threshold = room.target_high - self._cfg.hysteresis
+                    threshold = room.target_high - self._cfg.cool_hysteresis
                 detail = f" to {threshold:.1f}°C"
                 setpoint = unit.target_temperature
                 if setpoint is not None:
@@ -803,6 +977,8 @@ class GroupController:
             elif mode and self._wants(name, opposite):
                 activity = f"needs {opposite.name}, waiting for mode switch"
                 detail = f" ({self._mode_switch_blocker(now)})"
+            elif not room.heating and temp is not None and temp < room.target_low:
+                activity = "below range, heating off"
             else:
                 activity = "in range"
 

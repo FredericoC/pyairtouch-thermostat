@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pytest
+from pyairtouch import AcFanSpeed, AcMode
 
 from climate_service import (
     _parse_shutdown_window,
@@ -207,3 +208,96 @@ enabled = false
         toml = BASE_TOML.replace("target_low = 21", "target_low = 21\ndemand_persist_polls = 0")
         cfg = load_config(write_config(tmp_path, toml))
         assert cfg.demand_persist_polls == 1
+
+
+class TestPerModeTuning:
+    """heat_/cool_ hysteresis and boost, the heating switch, fan speeds."""
+
+    def test_legacy_keys_apply_to_both_modes(self, tmp_path):
+        toml = BASE_TOML.replace(
+            "target_low = 21", "target_low = 21\nhysteresis = 0.6\nsetpoint_boost = 1"
+        )
+        cfg = load_config(write_config(tmp_path, toml))
+        assert (cfg.heat_hysteresis, cfg.cool_hysteresis) == (0.6, 0.6)
+        assert (cfg.heat_setpoint_boost, cfg.cool_setpoint_boost) == (1.0, 1.0)
+
+    def test_defaults(self, tmp_path):
+        cfg = load_config(write_config(tmp_path, BASE_TOML))
+        assert (cfg.heat_hysteresis, cfg.cool_hysteresis) == (0.4, 0.4)
+        assert (cfg.heat_setpoint_boost, cfg.cool_setpoint_boost) == (0.0, 0.0)
+        assert cfg.heat_fan_speed is AcFanSpeed.AUTO
+        assert cfg.cool_fan_speed is AcFanSpeed.MEDIUM
+        assert cfg.pending_off_fan_speed is AcFanSpeed.QUIET
+        assert all(room.heating for room in cfg.rooms.values())
+
+    def test_per_mode_keys_win(self, tmp_path):
+        toml = BASE_TOML.replace(
+            "target_low = 21",
+            "target_low = 21\nhysteresis = 0.4\ncool_hysteresis = 1.2\n"
+            "setpoint_boost = 1\ncool_setpoint_boost = 0",
+        )
+        cfg = load_config(write_config(tmp_path, toml))
+        assert (cfg.heat_hysteresis, cfg.cool_hysteresis) == (0.4, 1.2)
+        assert (cfg.heat_setpoint_boost, cfg.cool_setpoint_boost) == (1.0, 0.0)
+        assert cfg.hysteresis(AcMode.COOL) == 1.2
+        assert cfg.setpoint_boost(AcMode.HEAT) == 1.0
+
+    def test_negative_hysteresis_rejected(self, tmp_path):
+        toml = BASE_TOML.replace("target_low = 21", "target_low = 21\ncool_hysteresis = -1")
+        with pytest.raises(ValueError, match=">= 0"):
+            load_config(write_config(tmp_path, toml))
+
+    def test_cool_hysteresis_may_not_cross_heating_off_threshold(self, tmp_path):
+        # 21–24 with heat 0.4: heating-off 21.4; cool 2.6 → cooling-off 21.4.
+        toml = BASE_TOML.replace("target_low = 21", "target_low = 21\ncool_hysteresis = 2.6")
+        with pytest.raises(ValueError, match="cooling-off threshold"):
+            load_config(write_config(tmp_path, toml))
+
+    def test_heating_off_relaxes_the_check_to_the_range_bottom(self, tmp_path):
+        toml = BASE_TOML.replace(
+            "target_low = 21", "target_low = 21\nheating = false\ncool_hysteresis = 2.6"
+        )
+        cfg = load_config(write_config(tmp_path, toml))  # 24 - 2.6 = 21.4 > 21
+        assert cfg.cool_hysteresis == 2.6
+        toml = BASE_TOML.replace(
+            "target_low = 21", "target_low = 21\nheating = false\ncool_hysteresis = 3"
+        )
+        with pytest.raises(ValueError, match="bottom of the range"):
+            load_config(write_config(tmp_path, toml))
+
+    def test_heating_switch_global_and_per_room(self, tmp_path):
+        toml = BASE_TOML.replace("target_low = 21", "target_low = 21\nheating = false")
+        toml += "\n[rooms.B]\nheating = true\n"
+        cfg = load_config(write_config(tmp_path, toml))
+        assert cfg.rooms["A"].heating is False
+        assert cfg.rooms["B"].heating is True
+
+    @pytest.mark.parametrize(
+        ("key", "value", "expected"),
+        [
+            ("cool_fan_speed", '"low"', AcFanSpeed.LOW),
+            ("cool_fan_speed", '"High"', AcFanSpeed.HIGH),  # case-insensitive
+            ("cool_fan_speed", '"keep"', None),
+            ("heat_fan_speed", '"keep"', None),
+            ("pending_off_fan_speed", '"off"', None),
+            ("pending_off_fan_speed", '"low"', AcFanSpeed.LOW),
+        ],
+    )
+    def test_fan_speed_values(self, tmp_path, key, value, expected):
+        toml = BASE_TOML.replace("target_low = 21", f"target_low = 21\n{key} = {value}")
+        cfg = load_config(write_config(tmp_path, toml))
+        assert getattr(cfg, key) is expected
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("cool_fan_speed", '"off"'),  # "off" is the pending-off word, not keep
+            ("pending_off_fan_speed", '"keep"'),
+            ("cool_fan_speed", '"turbo-ish"'),
+            ("cool_fan_speed", "3"),
+        ],
+    )
+    def test_bad_fan_speed_rejected(self, tmp_path, key, value):
+        toml = BASE_TOML.replace("target_low = 21", f"target_low = 21\n{key} = {value}")
+        with pytest.raises(ValueError, match=key):
+            load_config(write_config(tmp_path, toml))

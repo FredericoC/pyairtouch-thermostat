@@ -46,7 +46,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pyairtouch import AcMode, AcPowerControl, AcPowerState
+from pyairtouch import AcFanSpeed, AcMode, AcPowerControl, AcPowerState
 
 import climate_service
 from climate_service import Config, GroupController, ON_STATES, load_config
@@ -71,6 +71,14 @@ class ReplayUnit:
         self.power_state = AcPowerState.OFF
         self.selected_mode: AcMode | None = None
         self.active_mode: AcMode | None = None
+        # Fan speed isn't recorded in history.db; assume the house's AUTO
+        # (a variant that sets fan speeds will show the first-run command).
+        self.selected_fan_speed: AcFanSpeed | None = AcFanSpeed.AUTO
+        self.active_fan_speed: AcFanSpeed | None = AcFanSpeed.AUTO
+        self.supported_fan_speeds = (
+            AcFanSpeed.AUTO, AcFanSpeed.QUIET, AcFanSpeed.LOW,
+            AcFanSpeed.MEDIUM, AcFanSpeed.HIGH, AcFanSpeed.POWERFUL,
+        )
         self.min_target_temperature = 16.0
         self.max_target_temperature = 31.0
         self.target_temperature_resolution: float | None = 1.0
@@ -79,6 +87,11 @@ class ReplayUnit:
 
     def _log(self, verb: str, value: str) -> None:
         self._events.append((self._clock["now"], self.name, verb, value))
+
+    async def set_fan_speed(self, fan_speed: AcFanSpeed) -> None:
+        self._log("fan", fan_speed.name)
+        self.selected_fan_speed = fan_speed
+        self.active_fan_speed = fan_speed
 
     async def set_power(self, power_control: AcPowerControl) -> None:
         self._log("power", power_control.name)
@@ -374,17 +387,29 @@ def out_of_range_minutes(cfg: Config, feed: Feed, start_ts: float, end_ts: float
 
 
 def _parse_variant(spec: str, base: Config) -> tuple[str, Config]:
+    def boolean(v: str) -> bool:
+        return v.lower() in ("1", "true", "yes", "on")
+
+    def fan(none_word: str):
+        return lambda v: climate_service._parse_fan_speed("fan_speed", v, none_word=none_word)
+
+    # key -> (Config attribute(s), converter). Same names as config.toml.
     converters = {
-        "hysteresis": ("hysteresis", float),
-        "setpoint_boost": ("setpoint_boost", float),
-        "demand_persist_polls": ("demand_persist_polls", int),
-        "min_mode_dwell_minutes": ("min_mode_dwell", lambda v: float(v) * 60),
-        "min_power_toggle_minutes": ("min_power_toggle", lambda v: float(v) * 60),
-        "poll_interval_seconds": ("poll_interval", float),
-        "manage_setpoints": (
-            "manage_setpoints",
-            lambda v: v.lower() in ("1", "true", "yes"),
-        ),
+        "hysteresis": (("heat_hysteresis", "cool_hysteresis"), float),
+        "heat_hysteresis": (("heat_hysteresis",), float),
+        "cool_hysteresis": (("cool_hysteresis",), float),
+        "setpoint_boost": (("heat_setpoint_boost", "cool_setpoint_boost"), float),
+        "heat_setpoint_boost": (("heat_setpoint_boost",), float),
+        "cool_setpoint_boost": (("cool_setpoint_boost",), float),
+        "heat_fan_speed": (("heat_fan_speed",), fan("keep")),
+        "cool_fan_speed": (("cool_fan_speed",), fan("keep")),
+        "pending_off_fan_speed": (("pending_off_fan_speed",), fan("off")),
+        "demand_persist_polls": (("demand_persist_polls",), int),
+        "min_mode_dwell_minutes": (("min_mode_dwell",), lambda v: float(v) * 60),
+        "min_power_toggle_minutes": (("min_power_toggle",), lambda v: float(v) * 60),
+        "poll_interval_seconds": (("poll_interval",), float),
+        "manage_setpoints": (("manage_setpoints",), boolean),
+        "heating": (("rooms",), None),  # applies to every room; handled below
     }
     label, sep, rest = spec.partition(":")
     if not sep or not rest:
@@ -398,8 +423,19 @@ def _parse_variant(spec: str, base: Config) -> tuple[str, Config]:
                 f"--variant {spec!r}: unknown setting {key!r} "
                 f"(known: {', '.join(sorted(converters))})"
             )
-        attr, conv = converters[key]
-        changes[attr] = conv(value.strip())
+        attrs, conv = converters[key]
+        if key == "heating":
+            changes["rooms"] = {
+                name: dataclasses.replace(room, heating=boolean(value.strip()))
+                for name, room in base.rooms.items()
+            }
+            continue
+        try:
+            converted = conv(value.strip())
+        except ValueError as exc:
+            raise SystemExit(f"--variant {spec!r}: {exc}") from None
+        for attr in attrs:
+            changes[attr] = converted
     return label, dataclasses.replace(base, **changes)
 
 

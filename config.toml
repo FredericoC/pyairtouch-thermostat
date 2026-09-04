@@ -14,8 +14,20 @@ log_file = "climate.log"      # service log file (relative to this config file),
 [defaults]
 target_low = 23               # heat when a room drops below this
 target_high = 24.8            # cool when a room rises above this
-hysteresis = 0.4              # keep conditioning this far past the boundary before
-                              # switching a unit off (prevents rapid on/off cycling)
+heating = false               # false = never heat (summer). Rooms never demand
+                              # heat however cold they get, and a group with no
+                              # heating rooms stays in COOL all day — no more
+                              # 08:00 warm-up that the sun undoes by 11:00.
+                              # Override per room with [rooms."X"] heating = true.
+heat_hysteresis = 0.4         # keep heating this far above target_low before
+                              # switching a unit off
+cool_hysteresis = 1.2         # keep cooling this far below target_high before
+                              # switching off. Wider than heating on purpose:
+                              # cooling pulls the room sensor down within minutes
+                              # and the sun pushes it straight back, so a 0.4 band
+                              # gave 8-minute runs every 25 minutes in late winter
+                              # (see EFFICIENCY_PLAN.md). Rooms swing 23.6–24.9.
+                              # (`hysteresis` still works and sets both.)
 demand_persist_polls = 2      # a change in a room's demand must hold for this many
                               # consecutive polls before it's acted on — the console
                               # occasionally emits one glitched sample (e.g. several
@@ -27,11 +39,25 @@ min_power_toggle_minutes = 10 # minimum time between starts/stops of a group's
                               # on/off while other units in its group keep the
                               # compressor running is not held back.
 manage_setpoints = true       # also push each unit's setpoint to match the range
-setpoint_boost = 1            # °C to overshoot unit setpoints past the off
+heat_setpoint_boost = 1       # °C to overshoot heating setpoints past the off
                               # threshold. Units modulate on their own return-air
-                              # sensor and taper off before the room reaches temp;
-                              # the boost keeps them working until the room sensor
-                              # (which decides power-off) says stop.
+                              # sensor, which reads warm (stratification) before
+                              # the room does, so without the boost they taper
+                              # off early; the room sensor still decides power-off.
+cool_setpoint_boost = 0       # Cooling is the mirror image: the return-air
+                              # sensor reads *warmer* than the room, so the unit
+                              # never tapers early and a boost buys nothing —
+                              # it only widens the gap the unit sees, which in
+                              # AUTO fan means full blast, draft and undershoot.
+                              # (`setpoint_boost` still works and sets both.)
+cool_fan_speed = "medium"     # fan speed pushed when a unit starts cooling
+                              # (auto / quiet / low / medium / high / powerful,
+                              # or "keep" to never touch it). Default medium.
+heat_fan_speed = "auto"       # same for heating. Default auto.
+pending_off_fan_speed = "quiet"  # fan while the compressor hold below keeps a
+                              # satisfied unit on: as quiet as possible. "off"
+                              # disables the drop. The mode's fan speed is
+                              # re-asserted when the unit next switches on.
 
 [shutdown]
 enabled = true                # master switch for the windows below
@@ -71,7 +97,8 @@ members = ["MPR", "Bed 3", "Bed 4"]
 master = "Study"
 members = ["Study", "Living", "Master", "Bed 2"]
 
-# Per-room overrides of any [defaults] temperature value
+# Per-room overrides of any [defaults] temperature value, or of `heating`
+# (e.g. `heating = true` to keep one room heated while the rest is summer-only).
 
 # Jeni prefers her room warmer. HRV will even it out eventually though.
 [rooms."Bed 4"]

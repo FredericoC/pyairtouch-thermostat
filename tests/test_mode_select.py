@@ -2,6 +2,7 @@
 
 from pyairtouch import AcMode
 
+from climate_service import RoomConfig
 from conftest import make_config, make_group
 
 
@@ -85,3 +86,36 @@ class TestModeSwitchBlocker:
             make_config(), {"A": 22.0, "B": 22.0}, modes={"A": AcMode.HEAT}
         )
         assert ctl._mode_switch_blocker(now=0.0) == "switching next pass"
+
+
+class TestCoolingOnlyGroup:
+    """No room in the group may heat: it never selects HEAT."""
+
+    def cfg(self):
+        return make_config(
+            rooms={"A": RoomConfig(21.0, 24.0, heating=False), "B": RoomConfig(21.0, 24.0, heating=False)}
+        )
+
+    def test_first_run_picks_cool_even_when_cold(self):
+        ctl, _, _ = make_group(self.cfg(), {"A": 18.0, "B": 18.0})
+        assert ctl._select_mode(now=0.0) is AcMode.COOL
+
+    def test_adopted_heat_master_is_overridden(self):
+        ctl, _, _ = make_group(self.cfg(), {"A": 22.0, "B": 22.0}, modes={"A": AcMode.HEAT})
+        assert ctl._state.desired_mode is AcMode.COOL
+
+    async def test_tick_aligns_master_to_cool(self):
+        ctl, units, commands = make_group(
+            self.cfg(), {"A": 22.0, "B": 22.0}, modes={"A": AcMode.HEAT}
+        )
+        await ctl.tick(now=0.0)
+        assert commands == [("A", "mode", AcMode.COOL)]
+
+    def test_mixed_group_can_still_heat(self):
+        cfg = make_config(
+            rooms={"A": RoomConfig(21.0, 24.0, heating=False), "B": RoomConfig(21.0, 24.0)}
+        )
+        ctl, _, _ = make_group(cfg, {"A": 18.0, "B": 18.0})
+        assert ctl._select_mode(now=0.0) is AcMode.HEAT  # B's demand only
+        ctl, _, _ = make_group(cfg, {"A": 18.0, "B": 22.0})
+        assert ctl._select_mode(now=0.0) is AcMode.HEAT  # no demand: heat default
