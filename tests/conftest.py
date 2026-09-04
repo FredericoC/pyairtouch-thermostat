@@ -12,10 +12,20 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from pyairtouch import AcMode, AcPowerControl, AcPowerState
+from pyairtouch import AcFanSpeed, AcMode, AcPowerControl, AcPowerState
 
 import climate_service
 from climate_service import Config, GroupConfig, GroupController, RoomConfig
+
+# What the house's Daikin units report (no TURBO / INTELLIGENT_AUTO).
+FAN_SPEEDS = (
+    AcFanSpeed.AUTO,
+    AcFanSpeed.QUIET,
+    AcFanSpeed.LOW,
+    AcFanSpeed.MEDIUM,
+    AcFanSpeed.HIGH,
+    AcFanSpeed.POWERFUL,
+)
 
 
 class FakeAc:
@@ -27,6 +37,7 @@ class FakeAc:
         setpoint: float | None = None,
         power: AcPowerState = AcPowerState.OFF,
         mode: AcMode | None = None,
+        fan: AcFanSpeed = AcFanSpeed.AUTO,
         commands: list | None = None,
     ) -> None:
         self.name = name
@@ -35,10 +46,18 @@ class FakeAc:
         self.power_state = power
         self.selected_mode = mode
         self.active_mode = mode
+        self.selected_fan_speed = fan
+        self.active_fan_speed = fan
+        self.supported_fan_speeds = FAN_SPEEDS
         self.min_target_temperature = 16.0
         self.max_target_temperature = 31.0
         self.target_temperature_resolution: float | None = 0.1
         self.commands = commands if commands is not None else []
+
+    async def set_fan_speed(self, fan_speed: AcFanSpeed) -> None:
+        self.commands.append((self.name, "fan", fan_speed))
+        self.selected_fan_speed = fan_speed
+        self.active_fan_speed = fan_speed
 
     async def set_power(self, power_control: AcPowerControl) -> None:
         self.commands.append((self.name, "power", power_control))
@@ -60,17 +79,26 @@ class FakeAc:
 
 
 def make_config(**overrides) -> Config:
-    """A minimal valid Config: one group, master A + member B, range 21–24."""
+    """A minimal valid Config: one group, master A + member B, range 21–24.
+
+    Fan-speed control is off (None everywhere) so the many command-sequence
+    assertions stay focused; fan tests opt in explicitly.
+    """
     base = dict(
         host="",
         poll_interval=30.0,
         dry_run=False,
-        hysteresis=0.4,
+        heat_hysteresis=0.4,
+        cool_hysteresis=0.4,
         demand_persist_polls=2,
         min_mode_dwell=3600.0,
         min_power_toggle=600.0,
         manage_setpoints=True,
-        setpoint_boost=1.0,
+        heat_setpoint_boost=1.0,
+        cool_setpoint_boost=1.0,
+        heat_fan_speed=None,
+        cool_fan_speed=None,
+        pending_off_fan_speed=None,
         history_path=None,
         history_interval=60.0,
         weather_port=None,
@@ -92,6 +120,7 @@ def make_group(
     modes: dict[str, AcMode] | None = None,
     powers: dict[str, AcPowerState] | None = None,
     setpoints: dict[str, float] | None = None,
+    fans: dict[str, AcFanSpeed] | None = None,
 ) -> tuple[GroupController, dict[str, FakeAc], list]:
     """Build a GroupController over fake units for cfg's first group.
 
@@ -107,6 +136,7 @@ def make_group(
             mode=(modes or {}).get(name),
             power=(powers or {}).get(name, AcPowerState.OFF),
             setpoint=(setpoints or {}).get(name),
+            fan=(fans or {}).get(name, AcFanSpeed.AUTO),
             commands=commands,
         )
         for name in group.members

@@ -1,7 +1,7 @@
 """GroupController.tick: actuation, compressor gating, shutdown, dry-run."""
 
 import pytest
-from pyairtouch import AcMode, AcPowerControl, AcPowerState
+from pyairtouch import AcFanSpeed, AcMode, AcPowerControl, AcPowerState
 
 from conftest import make_config, make_group
 
@@ -203,3 +203,155 @@ class TestDryRun:
         await ctl.tick(now=0.0)
         assert commands == []  # coroutines closed, never executed
         assert units["A"].power_state is AcPowerState.OFF
+
+
+class TestFanSpeed:
+    """Per-mode fan speed on power-on; quiet drop while pending off."""
+
+    FANS = dict(
+        heat_fan_speed=AcFanSpeed.AUTO,
+        cool_fan_speed=AcFanSpeed.MEDIUM,
+        pending_off_fan_speed=AcFanSpeed.QUIET,
+    )
+
+    async def test_power_on_sets_mode_fan_before_power(self):
+        ctl, units, commands = make_group(
+            make_config(**self.FANS), {"A": 25.0, "B": 22.0}, modes={"A": AcMode.COOL}
+        )
+        await ctl.tick(now=0.0)
+        assert commands == [
+            ("A", "setpoint", 22.0),
+            ("A", "fan", AcFanSpeed.MEDIUM),
+            ("A", "power", AcPowerControl.TURN_ON),
+        ]
+        assert units["A"].selected_fan_speed is AcFanSpeed.MEDIUM
+
+    async def test_fan_already_right_sends_nothing(self):
+        ctl, _, commands = make_group(
+            make_config(**self.FANS),
+            {"A": 20.0, "B": 22.0},
+            modes={"A": AcMode.HEAT},
+            fans={"A": AcFanSpeed.AUTO},
+        )
+        await ctl.tick(now=0.0)
+        assert [c for c in commands if c[1] == "fan"] == []
+
+    async def test_fan_not_reasserted_while_running(self):
+        # Changed on the wall panel mid-run: left alone.
+        ctl, units, commands = make_group(
+            make_config(**self.FANS),
+            {"A": 25.0, "B": 22.0},
+            modes={"A": AcMode.COOL},
+            powers={"A": AcPowerState.ON},
+            fans={"A": AcFanSpeed.HIGH},
+        )
+        await ctl.tick(now=0.0)
+        assert [c for c in commands if c[1] == "fan"] == []
+
+    def pending_off(self, **cfg_overrides):
+        ctl, units, commands = make_group(
+            make_config(**{**self.FANS, **cfg_overrides}),
+            {"A": 23.3, "B": 22.0},  # below 24 - 0.4: satisfied
+            modes={"A": AcMode.COOL},
+            powers={"A": AcPowerState.ON},
+            fans={"A": AcFanSpeed.MEDIUM},
+        )
+        ctl._state.compressor_change = 970.0  # compressor started 30s ago
+        return ctl, units, commands
+
+    async def test_pending_off_drops_fan_once(self):
+        ctl, units, commands = self.pending_off()
+        await ctl.tick(now=1000.0)
+        assert commands == [
+            ("A", "setpoint", 24.0),  # parked: ceil(23.3)
+            ("A", "fan", AcFanSpeed.QUIET),
+        ]
+        assert ctl._state.rooms["A"].fan_parked
+        commands.clear()
+        await ctl.tick(now=1030.0)  # still held: nothing repeated
+        assert commands == []
+
+    async def test_pending_off_drop_without_setpoint_management(self):
+        ctl, units, commands = self.pending_off(manage_setpoints=False)
+        await ctl.tick(now=1000.0)
+        assert commands == [("A", "fan", AcFanSpeed.QUIET)]
+
+    async def test_hold_elapses_then_off_and_next_run_restores_fan(self):
+        ctl, units, commands = self.pending_off()
+        await ctl.tick(now=1000.0)
+        await ctl.tick(now=1570.0)  # hold over
+        assert ("A", "power", AcPowerControl.TURN_OFF) in commands
+        assert units["A"].selected_fan_speed is AcFanSpeed.QUIET  # console remembers
+        commands.clear()
+        units["A"].current_temperature = 24.5
+        for now in (1600.0, 1630.0):  # debounce, then compressor hold from the stop
+            await ctl.tick(now=now)
+        await ctl.tick(now=1570.0 + 600.0)
+        assert ("A", "fan", AcFanSpeed.MEDIUM) in commands
+        assert commands.index(("A", "fan", AcFanSpeed.MEDIUM)) < commands.index(
+            ("A", "power", AcPowerControl.TURN_ON)
+        )
+        assert not ctl._state.rooms["A"].fan_parked
+
+    async def test_demand_returns_while_parked_restores_fan(self):
+        ctl, units, commands = self.pending_off()
+        await ctl.tick(now=1000.0)
+        commands.clear()
+        units["A"].current_temperature = 24.5  # hot again before the hold let it off
+        await ctl.tick(now=1030.0)
+        await ctl.tick(now=1060.0)  # debounced
+        assert ("A", "fan", AcFanSpeed.MEDIUM) in commands
+        assert [c for c in commands if c[1] == "power"] == []
+        assert not ctl._state.rooms["A"].fan_parked
+
+    async def test_keep_mode_restores_pre_park_speed(self):
+        ctl, units, commands = self.pending_off(cool_fan_speed=None)
+        units["A"].selected_fan_speed = AcFanSpeed.HIGH  # whatever the user had
+        await ctl.tick(now=1000.0)
+        assert ("A", "fan", AcFanSpeed.QUIET) in commands
+        commands.clear()
+        units["A"].current_temperature = 24.5
+        await ctl.tick(now=1030.0)
+        await ctl.tick(now=1060.0)
+        assert ("A", "fan", AcFanSpeed.HIGH) in commands
+
+    async def test_no_pending_off_speed_no_drop(self):
+        ctl, units, commands = self.pending_off(pending_off_fan_speed=None)
+        await ctl.tick(now=1000.0)
+        assert [c for c in commands if c[1] == "fan"] == []
+        assert not ctl._state.rooms["A"].fan_parked
+
+    async def test_quiet_unsupported_falls_back_to_low(self):
+        ctl, units, commands = self.pending_off()
+        units["A"].supported_fan_speeds = (AcFanSpeed.AUTO, AcFanSpeed.LOW, AcFanSpeed.HIGH)
+        await ctl.tick(now=1000.0)
+        assert ("A", "fan", AcFanSpeed.LOW) in commands
+
+    async def test_unsupported_speed_warns_and_skips(self, caplog):
+        ctl, units, commands = make_group(
+            make_config(**self.FANS), {"A": 25.0, "B": 22.0}, modes={"A": AcMode.COOL}
+        )
+        units["A"].supported_fan_speeds = (AcFanSpeed.AUTO, AcFanSpeed.LOW, AcFanSpeed.HIGH)
+        with caplog.at_level("WARNING", logger="climate"):
+            await ctl.tick(now=0.0)
+        assert [c for c in commands if c[1] == "fan"] == []
+        assert ("A", "power", AcPowerControl.TURN_ON) in commands
+        assert "does not support fan speed MEDIUM" in caplog.text
+
+
+class TestPerModeBoost:
+    async def test_cool_boost_zero_keeps_floor_rounding(self):
+        ctl, _, commands = make_group(
+            make_config(cool_hysteresis=1.2, cool_setpoint_boost=0.0),
+            {"A": 25.0, "B": 22.0},
+            modes={"A": AcMode.COOL},
+        )
+        await ctl.tick(now=0.0)
+        assert ("A", "setpoint", 22.0) in commands  # floor(24 - 1.2)
+
+    async def test_heat_boost_untouched(self):
+        ctl, _, commands = make_group(
+            make_config(cool_setpoint_boost=0.0), {"A": 20.0, "B": 22.0}
+        )
+        await ctl.tick(now=0.0)
+        assert ("A", "setpoint", 23.0) in commands  # ceil(21 + 0.4 + 1)

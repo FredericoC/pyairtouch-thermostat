@@ -79,7 +79,14 @@ The service:
 
 - polls temperatures every `poll_interval_seconds` and turns each unit on when
   its room leaves the range (`target_low`–`target_high`) and off once it is
-  `hysteresis` degrees back inside it;
+  `heat_hysteresis` / `cool_hysteresis` degrees back inside it. The two differ
+  on purpose: heat slews slowly, while cooling pulls the room sensor down in
+  minutes and the sun pushes it straight back, so cooling wants a wider band
+  (1.2 vs 0.4) or the units short-cycle (`hysteresis` sets both);
+- can have heating switched off for the summer (`heating = false`, globally
+  or per room): such rooms never demand heat and a group with no heating
+  rooms stays in COOL, so there is no morning warm-up that the sun undoes by
+  lunchtime and no daily heat→cool mode flip;
 - sends mode (heat/cool) commands **only to the masters, without powering them
   on** — member units are only ever powered on/off;
 - switches a group between heating and cooling reluctantly: only when no room
@@ -88,14 +95,24 @@ The service:
   last switch;
 - avoids compressor short-cycling via `min_power_toggle_minutes` per unit.
   While that hold keeps a satisfied unit on ("pending off"), its setpoint is
-  parked at the room temperature so it idles instead of pumping more heat/cool
-  into the room; the normal setpoint is restored when it next runs;
+  parked at the room temperature and its fan dropped to
+  `pending_off_fan_speed` (default quiet) so it is as quiet as possible; the
+  normal setpoint and the mode's fan speed are restored when it next runs;
 - optionally pushes each unit's setpoint to match the range
-  (`manage_setpoints`), overshot by `setpoint_boost` °C past the power-off
-  threshold. The units modulate on their own return-air sensor, which sits in
-  warmer (stratified) air than the room sensor, so without the boost they
-  taper to a trickle before the room actually reaches temperature. Power-off
-  is still decided by the room sensor, so the boost can't overshoot the room;
+  (`manage_setpoints`), overshot by `heat_setpoint_boost` /
+  `cool_setpoint_boost` °C past the power-off threshold. Heating needs the
+  boost: the units modulate on their own return-air sensor, which sits in
+  warmer (stratified) air than the room sensor, so without it they taper to a
+  trickle before the room actually reaches temperature. Cooling is the
+  mirror image — the intake reads warmer than the room, the unit never
+  tapers early, and a boost only widens the gap it sees (full fan, draft,
+  undershoot), so `cool_setpoint_boost` is 0. Power-off is always decided by
+  the room sensor;
+- sets each unit's fan speed when it switches it on for a mode
+  (`heat_fan_speed`, default auto; `cool_fan_speed`, default medium — with
+  AUTO the boosted gap used to select full blast). Sent only on power-on, so
+  a fan speed changed on the wall panel mid-run sticks; `"keep"` opts a mode
+  out entirely;
 - reconnects automatically with backoff if the connection drops.
 
 All tuning lives in [`config.toml`](config.toml), including per-room range
@@ -275,7 +292,16 @@ or compare what alternate tunings would have decided:
 python replay.py --db history.db --from 2026-07-12 --to 2026-07-15
 python replay.py --db history.db --variant "hyst6:hysteresis=0.6" \
                  --variant "dwell90:min_mode_dwell_minutes=90"
+python replay.py --db history.db --from 2026-08-26 --to 2026-09-03 \
+                 --variant "summer:cool_hysteresis=1.2,cool_setpoint_boost=0,heating=false"
 ```
+
+Variant keys mirror `config.toml`: `hysteresis`, `heat_hysteresis`,
+`cool_hysteresis`, `setpoint_boost`, `heat_setpoint_boost`,
+`cool_setpoint_boost`, `heating` (all rooms), `heat_fan_speed`,
+`cool_fan_speed`, `pending_off_fan_speed`, `demand_persist_polls`,
+`min_mode_dwell_minutes`, `min_power_toggle_minutes`, `poll_interval_seconds`,
+`manage_setpoints`.
 
 Caveat (also printed by the tool): recorded temperatures are the outcome of
 the config that was live at the time, so variant replays show per-timestep

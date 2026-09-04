@@ -34,15 +34,26 @@ END = datetime(2026, 7, 15, tzinfo=TZ).timestamp()
 
 
 def pinned_config():
-    """The house config as of 2026-08-03, as literals (see module docstring)."""
+    """The house config as of 2026-08-03, as literals (see module docstring).
+
+    Predates the per-mode split (2026-09): equal hysteresis/boost for both
+    modes, heating on everywhere, and no fan-speed control — so the golden
+    decision log also proves those additions are behaviour-preserving at
+    their legacy values.
+    """
     return make_config(
         poll_interval=30.0,
-        hysteresis=0.4,
+        heat_hysteresis=0.4,
+        cool_hysteresis=0.4,
         demand_persist_polls=2,
         min_mode_dwell=60 * 60.0,
         min_power_toggle=10 * 60.0,
         manage_setpoints=True,
-        setpoint_boost=1.0,
+        heat_setpoint_boost=1.0,
+        cool_setpoint_boost=1.0,
+        heat_fan_speed=None,
+        cool_fan_speed=None,
+        pending_off_fan_speed=None,
         history_interval=60.0,
         shutdown_windows=((1200, 480),),  # 20:00–08:00
         groups=(

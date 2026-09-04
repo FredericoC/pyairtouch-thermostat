@@ -2,6 +2,7 @@
 
 from pyairtouch import AcMode, AcPowerState
 
+from climate_service import RoomConfig
 from conftest import make_config, make_group
 
 
@@ -95,3 +96,26 @@ class TestStatusReport:
         line_b = next(line for line in lines if line.strip().startswith("B"))
         assert "needs COOL, waiting for mode switch" in line_b
         assert "mode dwell" in line_b
+
+
+class TestPerModeStatus:
+    def test_cooling_line_uses_cool_hysteresis(self):
+        ctl, _, _ = make_group(
+            make_config(cool_hysteresis=1.2),
+            {"A": 25.0, "B": 22.0},
+            modes={"A": AcMode.COOL},
+            powers={"A": AcPowerState.ON},
+        )
+        _, lines = ctl.status_report(now=0.0)
+        line_a = next(line for line in lines if line.strip().startswith("A"))
+        assert "cooling to 22.8°C" in line_a  # target_high - cool_hysteresis
+
+    def test_cold_room_with_heating_off(self):
+        cfg = make_config(
+            rooms={"A": RoomConfig(21.0, 24.0, heating=False), "B": RoomConfig(21.0, 24.0)}
+        )
+        ctl, _, _ = make_group(cfg, {"A": 18.0, "B": 22.0}, modes={"A": AcMode.COOL})
+        _, lines = ctl.status_report(now=0.0)
+        line_a = next(line for line in lines if line.strip().startswith("A"))
+        assert "below range, heating off" in line_a
+        assert "pending on" not in line_a
