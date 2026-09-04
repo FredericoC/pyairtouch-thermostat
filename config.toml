@@ -50,7 +50,7 @@ cool_setpoint_boost = 0       # Cooling is the mirror image: the return-air
                               # it only widens the gap the unit sees, which in
                               # AUTO fan means full blast, draft and undershoot.
                               # (`setpoint_boost` still works and sets both.)
-cool_fan_speed = "medium"     # fan speed pushed when a unit starts cooling
+cool_fan_speed = "low"     # fan speed pushed when a unit starts cooling
                               # (auto / quiet / low / medium / high / powerful,
                               # or "keep" to never touch it). Default medium.
 heat_fan_speed = "auto"       # same for heating. Default auto.
