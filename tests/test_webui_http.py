@@ -203,5 +203,17 @@ class TestApiPost:
         assert r.status == 400
         assert fragment in r.body
 
+    def test_power_off_while_paused(self, server):
+        server.post("/api/override", b'{"pause": true}')
+        r = server.post("/api/power-off", b'{"units": ["A"]}')
+        assert r.status == 200
+        assert r.json() == {"pending": ["A"]}
+        assert server.get("/api/data?hours=1").json()["power_off_pending"] == ["A"]
+
+    def test_power_off_not_paused_is_400(self, server):
+        r = server.post("/api/power-off", b'{"all": true}')
+        assert r.status == 400
+        assert b"paused" in r.body
+
     def test_post_elsewhere_is_404(self, server):
         assert server.post("/api/data", b"{}").status == 404

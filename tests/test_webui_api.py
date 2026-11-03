@@ -216,6 +216,57 @@ class TestSetOverride:
             api.set_override({"shutdown": True})
 
 
+class TestPowerOff:
+    def make(self, tmp_path, *, paused=True):
+        api = make_api(tmp_path, [])
+        if paused:
+            api.set_override({"pause": True})
+        return api
+
+    def request(self, tmp_path):
+        return json.loads((tmp_path / "power_off_request.json").read_text())
+
+    def test_refused_unless_paused(self, tmp_path):
+        api = self.make(tmp_path, paused=False)
+        with pytest.raises(ValueError, match="paused"):
+            api.request_power_off({"units": ["A"]})
+        assert not (tmp_path / "power_off_request.json").exists()
+
+    def test_single_unit(self, tmp_path):
+        api = self.make(tmp_path)
+        assert api.request_power_off({"units": ["A"]}) == ["A"]
+        req = self.request(tmp_path)
+        assert req["units"] == ["A"]
+        assert abs(req["requested"] - time.time()) < 5
+        assert api.data(1.0)["power_off_pending"] == ["A"]
+
+    def test_all(self, tmp_path):
+        api = self.make(tmp_path)
+        assert api.request_power_off({"all": True}) == ["A", "B"]
+
+    def test_merges_with_pending(self, tmp_path):
+        api = self.make(tmp_path)
+        api.request_power_off({"units": ["B"]})
+        assert api.request_power_off({"units": ["A", "B"]}) == ["B", "A"]
+
+    def test_stale_pending_is_replaced(self, tmp_path):
+        api = self.make(tmp_path)
+        (tmp_path / "power_off_request.json").write_text(
+            json.dumps({"units": ["B"], "requested": time.time() - 3600}))
+        assert api.data(1.0)["power_off_pending"] == []
+        assert api.request_power_off({"units": ["A"]}) == ["A"]
+
+    @pytest.mark.parametrize("body", [{}, {"units": []}, {"units": "A"},
+                                      {"units": [1]}, {"all": "yes"}])
+    def test_bad_bodies(self, tmp_path, body):
+        with pytest.raises(ValueError, match="expected"):
+            self.make(tmp_path).request_power_off(body)
+
+    def test_unknown_unit(self, tmp_path):
+        with pytest.raises(ValueError, match="unknown units: Z"):
+            self.make(tmp_path).request_power_off({"units": ["A", "Z"]})
+
+
 class TestCsvAndLog:
     def test_csv(self, tmp_path):
         now = int(time.time())

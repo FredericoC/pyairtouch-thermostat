@@ -270,3 +270,75 @@ class TestRecordingAndConnection:
         with pytest.raises(ConnectionError):
             await run_pass(service, ctl, FakeAirTouch(initialised=False))
         assert commands == []
+
+
+def request_power_off(tmp_path, units, *, age=0.0) -> None:
+    import json
+    import time
+
+    (tmp_path / "power_off_request.json").write_text(
+        json.dumps({"units": units, "requested": time.time() - age}))
+
+
+class TestDashboardPowerOff:
+    async def test_paused_request_switches_named_unit_off(self, tmp_path, clock):
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0},
+            modes={"A": AcMode.HEAT, "B": AcMode.HEAT},
+            powers={"A": AcPowerState.ON, "B": AcPowerState.ON},
+        )
+        write_override(tmp_path, {"pause": True})
+        await run_pass(service, ctl)
+        assert commands == []
+
+        request_power_off(tmp_path, ["B"])
+        await run_pass(service, ctl)
+        assert power_commands(commands) == [("B", "power", AcPowerControl.TURN_OFF)]
+        assert units["A"].power_state is AcPowerState.ON
+        assert not (tmp_path / "power_off_request.json").exists()
+        commands.clear()
+        await run_pass(service, ctl)  # consumed: not repeated
+        assert commands == []
+
+    async def test_all_off_skips_units_already_off(self, tmp_path, clock):
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0},
+            modes={"A": AcMode.HEAT}, powers={"A": AcPowerState.ON},
+        )
+        write_override(tmp_path, {"pause": True})
+        request_power_off(tmp_path, ["A", "B", "Other group's unit"])
+        await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+        assert ctl._state.compressor_on is False
+
+    async def test_request_dropped_when_not_paused(self, tmp_path, clock):
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0},
+            modes={"A": AcMode.HEAT}, powers={"A": AcPowerState.ON},
+        )
+        request_power_off(tmp_path, ["A"])
+        await run_pass(service, ctl)
+        assert ("A", "power", AcPowerControl.TURN_OFF) not in commands
+        assert not (tmp_path / "power_off_request.json").exists()
+
+    async def test_stale_request_dropped(self, tmp_path, clock):
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0},
+            modes={"A": AcMode.HEAT}, powers={"A": AcPowerState.ON},
+        )
+        write_override(tmp_path, {"pause": True})
+        request_power_off(tmp_path, ["A"], age=3600)
+        await run_pass(service, ctl)
+        assert commands == []
+        assert not (tmp_path / "power_off_request.json").exists()
+
+    async def test_sleep_wakes_early_on_request(self, tmp_path, clock):
+        import asyncio
+        import time
+
+        service, *_ = build(tmp_path, clock, {"A": 20.0, "B": 22.0})
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.2, request_power_off, tmp_path, ["A"])
+        start = time.monotonic()
+        await service._sleep(30)
+        assert time.monotonic() - start < 3

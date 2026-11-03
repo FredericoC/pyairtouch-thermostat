@@ -66,6 +66,19 @@
   }
   #shutdown button:hover { color: var(--text-primary); }
   #shutdown button:disabled { opacity: 0.5; cursor: default; }
+  /* Kept well clear of Pause/Resume so a mis-tap can't hit it. */
+  #shutdown #allOffBtn { margin-left: 32px; }
+  /* Per-unit power-off (only live while paused) on the card's bottom row. */
+  .foot { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .foot .meta { min-width: 0; }
+  .unit-off {
+    font: inherit; font-size: 11.5px; color: var(--text-secondary); flex: none;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 6px; padding: 1px 8px; cursor: pointer; white-space: nowrap;
+  }
+  .unit-off:hover:not(:disabled) { color: var(--text-primary); border-color: var(--baseline); }
+  .unit-off:disabled { opacity: 0.45; cursor: default; }
+  .tile .unit-off { padding: 0 7px; }
   .now .status { font-size: 0.7em; font-weight: 400; margin-left: 3px; }
   @media (prefers-color-scheme: dark) { #next.stale { color: #e66767; } }
 
@@ -187,7 +200,7 @@
 
 <h1>AirTouch temperatures</h1>
 <div class="sub"><span id="subtitle">Loading…</span><span id="next"></span></div>
-<div class="sub" id="shutdown" hidden><span id="shutdownText"></span><button id="overrideBtn"></button><button id="pauseBtn"></button></div>
+<div class="sub" id="shutdown" hidden><span id="shutdownText"></span><button id="overrideBtn"></button><button id="pauseBtn"></button><button id="allOffBtn" hidden>All off</button></div>
 
 <div class="filters" id="filters">
   <button id="compactBtn">Compact</button>
@@ -696,7 +709,7 @@ function unitCard(unit) {
     const bits = [];
     if (last && last[3] && last[2] != null) bits.push(`set ${last[2].toFixed(1)}°`);
     bits.push(`${range[0].toFixed(1)}–${range[1].toFixed(1)}°`);
-    card.appendChild(htmlEl("div", "meta", bits.join(" · ")));
+    card.appendChild(cardFoot(unit, last, bits.join(" · ")));
     return card;
   }
 
@@ -715,8 +728,68 @@ function unitCard(unit) {
   head.appendChild(now);
   card.appendChild(head);
 
-  card.appendChild(htmlEl("div", "meta", `target ${range[0].toFixed(1)}–${range[1].toFixed(1)} °C`));
+  card.appendChild(cardFoot(unit, last, `target ${range[0].toFixed(1)}–${range[1].toFixed(1)} °C`));
   return card;
+}
+
+/* Power-off requests the service hasn't visibly acted on yet. The server
+   lists requests it still holds (power_off_pending); once the service takes
+   one (within a second or two) the unit still reads "on" until the next
+   history sample, so the click time is kept here until a newer sample shows
+   it off — or a few minutes pass (unit switched back on at the wall, say). */
+const switchingOff = new Map(); // unit -> request time (epoch s)
+function switchingOffNow(unit, last) {
+  if (state.data.power_off_pending?.includes(unit)) return true;
+  const at = switchingOff.get(unit);
+  if (at == null) return false;
+  if ((last && last[0] > at && !last[3]) || Date.now() / 1000 - at > 180) {
+    switchingOff.delete(unit);
+    return false;
+  }
+  return true;
+}
+
+/* Bottom row of a card/tile: the meta text, plus the unit's power-off
+   button. Live only while paused — otherwise the control policy owns power
+   (and would switch it straight back on); use Turn off/Pause instead. */
+function cardFoot(unit, last, metaText) {
+  const foot = htmlEl("div", "foot");
+  foot.appendChild(htmlEl("div", "meta", metaText));
+  const btn = htmlEl("button", "unit-off");
+  const paused = pausedNow();
+  const pending = switchingOffNow(unit, last);
+  const on = !!(last && last[3]);
+  btn.textContent = pending ? (state.compact ? "…" : "Switching off…")
+    : state.compact ? "⏻" : "⏻ Turn off";
+  btn.setAttribute("aria-label", `Turn off ${unit}`);
+  btn.title = !paused ? "Pause control to switch units off manually"
+    : pending ? `${unit} is being switched off`
+    : !on ? `${unit} is off` : `Turn off ${unit}`;
+  btn.disabled = !paused || pending || !on;
+  btn.addEventListener("click", () => requestPowerOff({ units: [unit] }, [unit]));
+  foot.appendChild(btn);
+  return foot;
+}
+
+async function requestPowerOff(body, units) {
+  const now = Date.now() / 1000;
+  for (const u of units) switchingOff.set(u, now);
+  render();
+  try {
+    const res = await fetch("/api/power-off", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+    state.data.power_off_pending = (await res.json()).pending;
+  } catch (err) {
+    for (const u of units) switchingOff.delete(u);
+    const banner = $("#banner");
+    banner.textContent = `Could not switch off ${units.length > 1 ? "the units" : units[0]} (${err.message}).`;
+    banner.style.display = "block";
+  }
+  render();
 }
 
 function renderGrid() {
@@ -874,12 +947,13 @@ function renderShutdown() {
   ovBtn.hidden = paused || !windows.length; // shutdown override needs windows
   ovBtn.textContent = active ? "Turn on" : "Turn off";
   $("#pauseBtn").textContent = paused ? "Resume" : "Pause";
+  $("#allOffBtn").hidden = !paused; // outside a pause, Turn off does this
   el.classList.toggle("active", active || paused);
   el.hidden = false;
 }
 
 async function postOverride(body) {
-  const buttons = [$("#overrideBtn"), $("#pauseBtn")];
+  const buttons = [$("#overrideBtn"), $("#pauseBtn"), $("#allOffBtn")];
   for (const b of buttons) b.disabled = true;
   try {
     const res = await fetch("/api/override", {
@@ -914,6 +988,16 @@ $("#overrideBtn").addEventListener("click", () =>
    them off) and still monitoring. */
 $("#pauseBtn").addEventListener("click", () =>
   postOverride({ pause: !pausedNow() }));
+
+/* While paused: switch every unit off (control stays paused). */
+$("#allOffBtn").addEventListener("click", () => {
+  const units = state.data.units;
+  const on = units.filter((u) => latestRaw(u)?.[3]);
+  const what = on.length ? `${on.length} running (${on.join(", ")})` : "none recorded as running";
+  if (!confirm(`Switch off all ${units.length} units? ${what[0].toUpperCase() + what.slice(1)}.\n\nControl stays paused.`))
+    return;
+  requestPowerOff({ all: true }, units);
+});
 
 function gapSeconds() {
   return Math.max(600, 3 * (state.data.bucket || state.data.sample_interval));

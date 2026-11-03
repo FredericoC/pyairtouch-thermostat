@@ -152,4 +152,10 @@ dashboard's "Pause" button (`{"pause": true}`): control is suspended entirely
 — no power/mode/setpoint commands, shutdown passes included — until "Resume"
 clears it (no auto-expiry), while history/weather recording continues, for
 running the units manually and still monitoring. Resuming inside a shutdown
-window runs the window's off pass (resume = back to schedule).
+window runs the window's off pass (resume = back to schedule). While paused, each unit card
+has a power-off button (disabled otherwise, or when the unit is off) and the
+header gets "All off" (with a confirm): POST `/api/power-off`
+(`{"units": [...]}` or `{"all": true}`, refused unless paused) writes
+`power_off_request.json` beside the override; the service's poll sleep wakes
+on the file within ~1 s, sends the offs, and deletes it. Requests older than
+5 minutes, or found while not paused, are dropped unexecuted.

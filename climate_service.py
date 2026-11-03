@@ -42,6 +42,10 @@ scheduled shutdown time. The same file can instead hold a pause: control is
 fully suspended (no power/mode/setpoint commands, shutdown passes included)
 until resumed from the dashboard, while temperature/weather recording carries
 on — for running the units manually, or not at all, and still monitoring.
+While paused, the dashboard can also switch individual units (or all of them)
+off: it writes `power_off_request.json` beside the override file and the
+service sends the power-off commands on its next poll (woken early by the
+file), then deletes it. Requests are dropped unless paused.
 
 Run with:
     python climate_service.py                 # uses ./config.toml
@@ -375,6 +379,48 @@ def read_control_override(path: Path, now: float | None = None) -> dict | None:
         return None
     return override
 
+
+
+# Dashboard power-off requests older than this are dropped unexecuted: the
+# service was down or the request is otherwise stale — acting on it later
+# would switch off a unit someone has since turned back on.
+POWER_REQUEST_MAX_AGE = 300.0
+
+
+def power_request_path(override_path: Path) -> Path:
+    """Where the dashboard drops power-off requests (beside the override)."""
+    return override_path.with_name("power_off_request.json")
+
+
+def take_power_request(path: Path, now: float | None = None) -> list[str] | None:
+    """Consume the dashboard's power-off request: the unit names, or None.
+
+    The file is {"units": [name, ...], "requested": epoch seconds}, written by
+    webui.py (which merges into a pending request). It is renamed away before
+    reading, so a request written while this runs lands in a fresh file and is
+    picked up next poll instead of being lost. Stale or invalid requests are
+    discarded (None); so is any request the caller then can't act on.
+    """
+    claimed = path.with_name(path.name + ".taken")
+    try:
+        path.replace(claimed)
+    except FileNotFoundError:
+        return None
+    try:
+        raw = json.loads(claimed.read_text(encoding="utf-8"))
+        units = [str(u) for u in raw["units"]]
+        requested = float(raw["requested"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        _LOGGER.warning("Ignoring invalid dashboard power-off request")
+        return None
+    finally:
+        claimed.unlink(missing_ok=True)
+    age = (time.time() if now is None else now) - requested
+    if age > POWER_REQUEST_MAX_AGE:
+        _LOGGER.warning("Ignoring stale dashboard power-off request (%.0fs old): %s",
+                        age, ", ".join(units))
+        return None
+    return units
 
 # ---------------------------------------------------------------------------
 # Control logic
@@ -765,6 +811,27 @@ class GroupController:
         """
         for room_state in self._state.rooms.values():
             room_state.running_for = None
+
+    async def manual_power_off(self, names: list[str], now: float) -> None:
+        """Switch off the named members that are on — a dashboard request
+        while paused. Unknown names (other groups' units) are skipped."""
+        switched = False
+        for name in self._group.members:
+            if name not in names:
+                continue
+            unit = self._units[name]
+            self._state.rooms[name].running_for = None
+            if unit.power_state in ON_STATES:
+                await self._send(
+                    f"[{self._group.name}] {name}: power → OFF (dashboard, paused)",
+                    unit.set_power(AcPowerControl.TURN_OFF),
+                )
+                switched = True
+        # Last unit off stops the outdoor unit: stamp it so a resume right
+        # after doesn't restart the compressor inside min_power_toggle.
+        if switched and not any(self._units[n].power_state in ON_STATES
+                                for n in self._group.members if n not in names):
+            self._note_compressor(False, now)
 
     async def enforce_shutdown(self, now: float) -> None:
         """Force every unit off, regardless of demand or anti-short-cycle timers.
@@ -1194,6 +1261,21 @@ class ClimateService:
                 until,
             )
 
+    async def _handle_power_request(
+        self, controllers: list[GroupController], now: float, paused: bool
+    ) -> None:
+        """Run the dashboard's pending power-off request, if any (paused only)."""
+        names = take_power_request(power_request_path(self._cfg.override_path))
+        if names is None:
+            return
+        if not paused:
+            _LOGGER.warning("Ignoring dashboard power-off request (%s): control "
+                            "is not paused", ", ".join(names))
+            return
+        _LOGGER.info("Dashboard power-off request: %s", ", ".join(names))
+        for controller in controllers:
+            await controller.manual_power_off(names, now)
+
     async def _connect(self) -> tuple[pyairtouch.AirTouch, list[GroupController]]:
         discovered = await pyairtouch.discover(remote_host=self._cfg.host or None)
         if not discovered:
@@ -1292,6 +1374,7 @@ class ClimateService:
                 else:
                     await controller.tick(now)
             self._was_paused = paused
+            await self._handle_power_request(controllers, now, paused)
             # False while paused so that resuming inside a shutdown window
             # runs the off pass (resume means "back to schedule").
             self._was_shutdown = shutdown and not paused
@@ -1341,10 +1424,19 @@ class ClimateService:
             await self._sleep(self._cfg.poll_interval)
 
     async def _sleep(self, seconds: float) -> None:
-        try:
-            await asyncio.wait_for(self._stop.wait(), timeout=seconds)
-        except TimeoutError:
-            pass
+        """Sleep until the next poll — cut short by a stop request, or by a
+        dashboard power-off request so the button acts within a second or
+        two rather than a whole poll interval."""
+        request = power_request_path(self._cfg.override_path)
+        deadline = time.monotonic() + seconds
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=min(remaining, 1.0))
+                return
+            except TimeoutError:
+                pass
+            if request.exists():
+                return
 
 
 async def main() -> int:

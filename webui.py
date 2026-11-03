@@ -15,13 +15,20 @@ import json
 import logging
 import sqlite3
 import sys
+import time as _time  # datetime's `time` holds the bare name
 from contextlib import closing
 from datetime import date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from climate_service import Config, load_config, read_control_override
+from climate_service import (
+    POWER_REQUEST_MAX_AGE,
+    Config,
+    load_config,
+    power_request_path,
+    read_control_override,
+)
 
 _LOGGER = logging.getLogger("webui")
 
@@ -157,6 +164,8 @@ class Api:
             # state until it expires (next window boundary); {"pause": true}
             # — control fully suspended until resumed; or None.
             "override": read_control_override(self._cfg.override_path),
+            # Units with a power-off request the service hasn't run yet.
+            "power_off_pending": self._pending_power_off(),
             "sample_interval": self._cfg.history_interval,
             "poll_interval": self._cfg.poll_interval,
             "latest_ts": latest_ts,
@@ -304,6 +313,49 @@ class Api:
         tmp.replace(path)
         return override
 
+    def _pending_power_off(self) -> list[str]:
+        path = power_request_path(self._cfg.override_path)
+        try:
+            pending = json.loads(path.read_text(encoding="utf-8"))
+            if _time.time() - float(pending["requested"]) <= POWER_REQUEST_MAX_AGE:
+                return [str(u) for u in pending["units"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return []
+
+    def request_power_off(self, body: dict) -> list[str]:
+        """Queue a power-off for some units (or all) — only while paused.
+
+        Body: {"units": [name, ...]} or {"all": true}. Writes the service's
+        power_off_request.json (merging with a still-pending request); the
+        service wakes on the file, sends the commands and deletes it. Returns
+        the units now pending. Refused when control isn't paused: the policy
+        would just switch them back on (outside a pause use Turn off).
+        """
+        override = read_control_override(self._cfg.override_path)
+        if not (override and override.get("pause")):
+            raise ValueError("units can only be switched off while control is paused")
+        if body.get("all") is True:
+            units = list(self._units)
+        else:
+            units = body.get("units")
+            if not isinstance(units, list) or not units or not all(
+                isinstance(u, str) for u in units
+            ):
+                raise ValueError("expected {'units': [name, ...]} or {'all': true}")
+            unknown = sorted(set(units) - set(self._units))
+            if unknown:
+                raise ValueError(f"unknown units: {', '.join(unknown)}")
+        pending = self._pending_power_off()
+        units = [*pending, *(u for u in units if u not in pending)]
+        path = power_request_path(self._cfg.override_path)
+        _LOGGER.info("power-off requested: %s", ", ".join(units))
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"units": units, "requested": _time.time()}),
+                       encoding="utf-8")
+        tmp.replace(path)
+        return units
+
     def csv(self, hours: float) -> str:
         with closing(self._connect()) as conn:
             rows = conn.execute(
@@ -360,7 +412,12 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
                 self._respond(500, "text/plain", b"internal error")
 
         def _route_post(self) -> None:
-            if urlparse(self.path).path != "/api/override":
+            path = urlparse(self.path).path
+            handlers = {
+                "/api/override": lambda b: {"override": api.set_override(b)},
+                "/api/power-off": lambda b: {"pending": api.request_power_off(b)},
+            }
+            if path not in handlers:
                 self._respond(404, "text/plain", b"not found")
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -368,12 +425,11 @@ def make_handler(api: Api, html_path: Path) -> type[BaseHTTPRequestHandler]:
                 body = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
-                override = api.set_override(body)
+                result = handlers[path](body)
             except ValueError as exc:
                 self._respond(400, "text/plain", str(exc).encode())
                 return
-            self._respond(200, "application/json",
-                          json.dumps({"override": override}).encode())
+            self._respond(200, "application/json", json.dumps(result).encode())
 
         def _route(self) -> None:
             parsed = urlparse(self.path)
