@@ -31,9 +31,12 @@ because the sun re-heats a room within minutes), `heat_setpoint_boost`/
 demand heat and a group with no heating rooms stays in COOL.
 
 Optional `[shutdown]` windows (e.g. "21:00-07:00", local time) switch every
-unit off for night or away periods: when a window starts, a single off pass
-turns everything off and the normal control policy is suspended for the rest
-of the window. A unit switched on manually during the window is left alone.
+unit off for night or away periods: when a window starts, units that are
+mid-run get to finish (`wind_down_minutes`: they're switched off the normal
+way once their room is satisfied, forced off at the limit; nothing new
+starts), everything else is off, and the normal control policy is suspended
+for the rest of the window. A unit switched on manually during the window is
+left alone.
 The web dashboard can override the shutdown state either way via a small JSON
 file (`control_override.json` beside the config, read every poll); the
 override expires at the next window boundary, so it never outlasts the
@@ -135,6 +138,10 @@ class Config:
     weather_path: str
     log_path: Path | None  # None = file logging disabled (stdout only)
     shutdown_windows: tuple[tuple[int, int], ...]  # (start, end) minutes past midnight
+    # Seconds a unit already running when a window starts may keep running to
+    # finish its run (switched off once its room is satisfied, through the
+    # normal anti-short-cycle path); forced off after this. 0 = off at once.
+    shutdown_wind_down: float
     override_path: Path  # dashboard's shutdown override file (may not exist)
     groups: tuple[GroupConfig, ...]
     rooms: dict[str, RoomConfig]
@@ -160,6 +167,21 @@ class Config:
             elif minute >= start or minute < end:  # window crosses midnight
                 return True
         return False
+
+    def shutdown_window_start(self, local_now: datetime) -> datetime | None:
+        """When the shutdown window covering local_now began (None if none does).
+
+        With overlapping windows, the earliest start wins.
+        """
+        minute = local_now.hour * 60 + local_now.minute
+        elapsed = [
+            (minute - start) % (24 * 60)
+            for start, end in self.shutdown_windows
+            if (start <= minute < end if start < end else minute >= start or minute < end)
+        ]
+        if not elapsed:
+            return None
+        return local_now.replace(second=0, microsecond=0) - timedelta(minutes=max(elapsed))
 
     def next_shutdown_boundary(self, local_now: datetime) -> datetime | None:
         """When the next shutdown window starts or ends (whichever comes first).
@@ -304,6 +326,9 @@ def load_config(path: Path) -> Config:
         if not isinstance(specs, list) or not all(isinstance(s, str) for s in specs):
             raise ValueError("[shutdown] windows must be a list of 'HH:MM-HH:MM' strings")
         shutdown_windows = tuple(_parse_shutdown_window(s) for s in specs)
+    shutdown_wind_down = float(shutdown.get("wind_down_minutes", 60)) * 60
+    if shutdown_wind_down < 0:
+        raise ValueError("[shutdown] wind_down_minutes must be >= 0")
 
     # Written by the web dashboard, read by the service every poll. Lives
     # beside the config so both processes agree on the path.
@@ -351,6 +376,7 @@ def load_config(path: Path) -> Config:
         weather_path=str(weather.get("path", "/data/report/")),
         log_path=log_path,
         shutdown_windows=shutdown_windows,
+        shutdown_wind_down=shutdown_wind_down,
         override_path=override_path,
         groups=groups,
         rooms=rooms,
@@ -497,6 +523,12 @@ class GroupController:
         # HEAT, whatever the master was left in.
         self._can_heat = any(cfg.room(n).heating for n in group.members)
         self._fan_warned: set[str] = set()  # units warned about unsupported fan speeds
+        # Shutdown wind-down: the units still finishing the run they were on
+        # when the window began (None = no wind-down in progress), and whether
+        # this window's wind-down has been set up (so units that finish aren't
+        # re-adopted, nor manual ones picked up later).
+        self._wind_down: set[str] | None = None
+        self._wind_down_begun = False
         self._adopt_current_state()
 
     def _adopt_current_state(self) -> None:
@@ -811,6 +843,7 @@ class GroupController:
         """
         for room_state in self._state.rooms.values():
             room_state.running_for = None
+        self._reset_wind_down()
 
     async def manual_power_off(self, names: list[str], now: float) -> None:
         """Switch off the named members that are on — a dashboard request
@@ -840,6 +873,8 @@ class GroupController:
         switched on manually during the window stays on until the control
         policy resumes at the end of the window.
         """
+        self._wind_down = None
+        self._wind_down_begun = True  # nothing left to finish in this window
         for name in self._group.members:
             unit = self._units[name]
             room_state = self._state.rooms[name]
@@ -851,7 +886,92 @@ class GroupController:
                 )
         self._note_compressor(False, now)
 
+    def _reset_wind_down(self) -> None:
+        if self._wind_down:
+            _LOGGER.info("[%s] shutdown wind-down abandoned (%s still on): "
+                         "control resumed or paused",
+                         self._group.name, ", ".join(sorted(self._wind_down)))
+        self._wind_down = None
+        self._wind_down_begun = False
+
+    @property
+    def winding_down(self) -> bool:
+        """Whether units are still finishing their runs into a shutdown window."""
+        return bool(self._wind_down)
+
+    async def wind_down(self, now: float, remaining: float) -> bool:
+        """One pass of a shutdown window's wind-down; True once finished.
+
+        Instead of cutting units off the moment a window starts (a unit that
+        started at 21:29 would be stopped at 21:30, mid-run, with the
+        compressor's anti-short-cycle hold bypassed), units that are on when
+        the wind-down begins keep running under the normal policy until their
+        room is satisfied, and are then switched off the normal way — so the
+        compressor hold and the pending-off quieting still apply. Nothing is
+        switched on, units that are off (or get switched off by hand) drop
+        out, and no mode changes are sent. Once `remaining` (seconds of the
+        `wind_down_minutes` allowance) runs out, whatever is still on from the
+        wind-down is forced off. Units switched on manually during the window
+        are never touched.
+        """
+        if not self._wind_down_begun:
+            self._wind_down_begun = True
+            self._wind_down = {
+                n for n in self._group.members
+                if self._units[n].power_state in ON_STATES
+            }
+            if self._wind_down:
+                _LOGGER.info(
+                    "[%s] shutdown window: letting %s finish (forced off in %dm)",
+                    self._group.name, ", ".join(sorted(self._wind_down)),
+                    max(0, remaining) // 60,
+                )
+        pending = self._wind_down
+        if not pending:
+            return True
+
+        self._observe_compressor(now)
+        self._commanded.clear()
+        self._update_demands()
+        mode = self._state.desired_mode
+        forced: list[str] = []
+        for name in self._group.members:
+            if name not in pending:
+                continue
+            unit = self._units[name]
+            room_state = self._state.rooms[name]
+            if unit.power_state not in ON_STATES:
+                pending.discard(name)  # switched off by hand
+                room_state.running_for = None
+                continue
+            if remaining <= 0 or mode is None:
+                await self._send(
+                    f"[{self._group.name}] {name}: power → OFF "
+                    f"(shutdown window, wind-down limit reached)",
+                    unit.set_power(AcPowerControl.TURN_OFF),
+                )
+                pending.discard(name)
+                room_state.running_for = None
+                self._commanded[name] = False
+                forced.append(name)
+                continue
+            await self._tick_room(name, mode, now)
+            if self._commanded.get(name) is False:
+                pending.discard(name)
+                room_state.running_for = None
+        # The console may not have echoed the forced offs yet: count them.
+        if forced and not any(
+            self._commanded.get(n, self._units[n].power_state in ON_STATES)
+            for n in self._group.members
+        ):
+            self._note_compressor(False, now)
+        if not pending:
+            _LOGGER.info("[%s] shutdown wind-down complete", self._group.name)
+            return True
+        return False
+
     async def tick(self, now: float) -> None:
+        self._reset_wind_down()  # control resumed: any wind-down is over
         self._observe_compressor(now)
         self._commanded.clear()
         self._update_demands()
@@ -965,7 +1085,8 @@ class GroupController:
             running_for = self._state.rooms[name].running_for
             if on and running_for:
                 activity = f"{running_for.name.lower()}ing"
-            elif on and suspended and unit.active_mode in (AcMode.HEAT, AcMode.COOL):
+            elif (on and suspended and name not in (self._wind_down or ())
+                  and unit.active_mode in (AcMode.HEAT, AcMode.COOL)):
                 # Switched on manually while control is suspended: the policy
                 # isn't driving it, but the unit's own mode says what it's
                 # doing. active_mode resolves AUTO to heat/cool.
@@ -1025,7 +1146,7 @@ class GroupController:
             running_for = self._state.rooms[name].running_for
 
             detail = ""
-            if suspended:
+            if suspended and name not in (self._wind_down or ()):
                 activity = "control suspended" if not on else "on manually (control suspended)"
             elif on and running_for:
                 activity = f"{running_for.name.lower()}ing"
@@ -1211,8 +1332,21 @@ class ClimateService:
         # whole group off for min_power_toggle_minutes (seen when a deploy
         # preceded a dashboard "turn on" by a minute). Trade-off: a window
         # that begins while the service is down gets no off pass.
-        _, paused, shutdown = self._override_state()
+        local_now = datetime.now()
+        override, paused, shutdown = self._override_state(local_now)
         self._was_shutdown = shutdown and not paused
+        # Wall-clock epoch at which the current window's wind-down ends and any
+        # unit still finishing its run is forced off; None = no wind-down.
+        # Lives on the service so a reconnect (fresh controllers) carries on
+        # with it. A restart shortly after a scheduled window start resumes
+        # it — otherwise a unit caught mid-run by the restart would be left
+        # on all night.
+        self._wind_down_until: float | None = None
+        window_start = cfg.shutdown_window_start(local_now)
+        if self._was_shutdown and override is None and window_start is not None:
+            until = window_start.timestamp() + cfg.shutdown_wind_down
+            if until > local_now.timestamp():
+                self._wind_down_until = until
         self._was_paused = False  # so the release pass runs once per pause
         self._last_override: bool | str | None = None  # last poll's dashboard override
         self._history: HistoryRecorder | None = None
@@ -1358,21 +1492,40 @@ class ClimateService:
                 raise ConnectionError("AirTouch connection is no longer initialised")
 
             now = time.monotonic()
-            override, paused, shutdown = self._override_state()
+            local_now = datetime.now()
+            override, paused, shutdown = self._override_state(local_now)
             suspended = paused or shutdown  # control policy not driving units
             self._log_override_change(override)
+            if paused or not shutdown:
+                self._wind_down_until = None
+            elif not self._was_shutdown:
+                # The window starts. On schedule (not a dashboard "Turn off",
+                # not a resume from pause) units mid-run get to finish first.
+                self._wind_down_until = None
+                if (override is None and not self._was_paused
+                        and self._cfg.shutdown_wind_down > 0):
+                    self._wind_down_until = (
+                        local_now.timestamp() + self._cfg.shutdown_wind_down
+                    )
+            finished = True
             for controller in controllers:
                 if paused:
                     # Send nothing at all — not even the shutdown off pass.
                     if not self._was_paused:
                         controller.release()
                 elif shutdown:
-                    # One off pass at window start only; manual changes made
-                    # during the window are left alone.
-                    if not self._was_shutdown:
+                    # One off pass (or wind-down) at window start only; manual
+                    # changes made during the window are left alone.
+                    if self._wind_down_until is not None:
+                        finished &= await controller.wind_down(
+                            now, self._wind_down_until - local_now.timestamp()
+                        )
+                    elif not self._was_shutdown:
                         await controller.enforce_shutdown(now)
                 else:
                     await controller.tick(now)
+            if self._wind_down_until is not None and finished:
+                self._wind_down_until = None
             self._was_paused = paused
             await self._handle_power_request(controllers, now, paused)
             # False while paused so that resuming inside a shutdown window
@@ -1400,9 +1553,15 @@ class ClimateService:
                 )
                 signatures.append(f"override:{override['shutdown']}")
             if shutdown and not paused:
-                lines.append("SHUTDOWN window active — units switched off at "
-                             "window start; manual changes are respected")
-                signatures.append("shutdown")
+                if self._wind_down_until is not None:
+                    until = datetime.fromtimestamp(self._wind_down_until).strftime("%H:%M")
+                    lines.append("SHUTDOWN window active — letting running units "
+                                 f"finish (forced off at {until}); nothing new starts")
+                    signatures.append("shutdown:wind-down")
+                else:
+                    lines.append("SHUTDOWN window active — units switched off at "
+                                 "window start; manual changes are respected")
+                    signatures.append("shutdown")
             for controller in controllers:
                 sig, group_lines = controller.status_report(now, suspended=suspended)
                 signatures.append(sig)

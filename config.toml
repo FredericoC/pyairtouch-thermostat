@@ -63,12 +63,19 @@ pending_off_fan_speed = "quiet"  # fan while the compressor hold below keeps a
 enabled = true                # master switch for the windows below
 windows = ["21:30-08:00"]     # local time, "HH:MM-HH:MM"; may cross midnight.
                               # When a window starts every unit is switched
-                              # off once; a unit switched on manually during
-                              # the window stays on. Add more windows as extra
+                              # off once (but see wind_down_minutes); a unit
+                              # switched on manually during the window stays on. Add more windows as extra
                               # list entries; for an "away" mode use
                               # ["00:00-24:00"] (all day, every day).
                               # The service reads this file only at startup —
                               # restart it after changes.
+wind_down_minutes = 60        # a unit still running when a window starts keeps
+                              # running until its room reaches temp, then goes
+                              # off the normal way (compressor hold included) —
+                              # a 21:29 start isn't cut off at 21:30. Nothing
+                              # new starts. Forced off after this many minutes;
+                              # 0 = switch everything off at window start.
+                              # A dashboard "Turn off" is always immediate.
 
 [history]
 enabled = true                # record per-unit temperature samples over time

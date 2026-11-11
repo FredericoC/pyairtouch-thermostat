@@ -65,12 +65,13 @@ def clock(monkeypatch):
     return Clock(monkeypatch, datetime(2026, 1, 1, 12, 0))
 
 
-def build(tmp_path, clock, temps, *, history=False, **group_kwargs):
+def build(tmp_path, clock, temps, *, history=False, cfg_kwargs=None, **group_kwargs):
     """A service + one controller over fake units, built at the clock's time."""
     cfg = make_config(
         shutdown_windows=WINDOWS,
         override_path=tmp_path / "control_override.json",
         history_path=(tmp_path / "history.db") if history else None,
+        **(cfg_kwargs or {}),
     )
     ctl, units, commands = make_group(cfg, temps, **group_kwargs)
     service = ClimateService(cfg)
@@ -144,6 +145,152 @@ class TestSchedule:
         clock.set(20, 0)
         await run_pass(service, ctl)
         assert commands == []
+
+
+WIND_DOWN = {"shutdown_wind_down": 3600.0}  # 1 h to finish runs
+
+
+class TestWindDown:
+    """A window opening mid-run lets running units finish rather than cutting
+    them off; nothing new starts; a cap stops runs that never finish."""
+
+    async def heating_at_window_start(self, tmp_path, clock, **cfg):
+        clock.set(19, 59)
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0},
+            cfg_kwargs={**WIND_DOWN, **cfg},
+        )
+        await run_pass(service, ctl)
+        assert units["A"].power_state is AcPowerState.ON
+        commands.clear()
+        clock.set(20, 0)
+        await run_pass(service, ctl)
+        return service, ctl, units, commands
+
+    async def test_running_unit_finishes_then_switches_off(self, tmp_path, clock):
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock, min_power_toggle=0.0)
+        assert power_commands(commands) == []  # not cut off at 20:00
+        assert ctl.winding_down
+        units["A"].current_temperature = 21.5  # past 21.0 + 0.4 hysteresis
+        for minute in (10, 11):  # demand change is debounced over 2 polls
+            clock.set(20, minute)
+            await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+        assert not ctl.winding_down
+        assert service._wind_down_until is None
+        commands.clear()
+        units["A"].power_state = AcPowerState.ON  # manual after the wind-down
+        clock.set(20, 30)
+        await run_pass(service, ctl)
+        assert commands == []
+
+    async def test_compressor_hold_still_applies(self, tmp_path, clock):
+        # A started at 19:59; satisfied straight away, it must idle out the
+        # min_power_toggle hold (parked setpoint) instead of stopping at once.
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock)
+        units["A"].current_temperature = 21.5
+        for minute in (1, 2):
+            clock.set(20, minute)
+            await run_pass(service, ctl)
+        assert power_commands(commands) == []
+        assert ("A", "setpoint", 21.0) in commands  # idle_setpoint: floor(21.5)
+        assert ctl.winding_down
+
+    async def test_nothing_new_starts(self, tmp_path, clock):
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock, min_power_toggle=0.0)
+        units["B"].current_temperature = 19.0  # B now wants heat too
+        for minute in (1, 2, 3):
+            clock.set(20, minute)
+            await run_pass(service, ctl)
+        assert ("B", "power", AcPowerControl.TURN_ON) not in commands
+        assert units["B"].power_state is AcPowerState.OFF
+
+    async def test_manual_unit_during_wind_down_left_alone(self, tmp_path, clock):
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock, min_power_toggle=0.0)
+        units["B"].power_state = AcPowerState.ON  # switched on by hand, satisfied
+        units["A"].current_temperature = 21.5
+        for minute in (1, 2, 3):
+            clock.set(20, minute)
+            await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+        assert units["B"].power_state is AcPowerState.ON
+
+    async def test_limit_forces_off(self, tmp_path, clock):
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock)
+        clock.set(20, 59)
+        await run_pass(service, ctl)
+        assert power_commands(commands) == []
+        clock.set(21, 0)  # never reached temp: forced off at the limit
+        await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+        assert ctl._state.compressor_on is False
+        assert service._wind_down_until is None
+
+    async def test_dashboard_turn_off_is_immediate(self, tmp_path, clock):
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0}, cfg_kwargs=WIND_DOWN)
+        await run_pass(service, ctl)
+        commands.clear()
+        write_override(tmp_path, {"shutdown": True, "expires": clock.timestamp() + 3600})
+        clock.set(12, 1)
+        await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+
+    async def test_resume_inside_window_is_immediate(self, tmp_path, clock):
+        clock.set(20, 5)
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0}, cfg_kwargs=WIND_DOWN)
+        write_override(tmp_path, {"pause": True})
+        await run_pass(service, ctl)
+        units["A"].power_state = AcPowerState.ON
+        clear_override(tmp_path)
+        clock.set(20, 6)
+        await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+
+    async def test_turn_on_during_wind_down_resumes_control(self, tmp_path, clock):
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock)
+        write_override(tmp_path, {"shutdown": False, "expires": clock.timestamp() + 3600})
+        clock.set(20, 1)
+        await run_pass(service, ctl)
+        assert not ctl.winding_down
+        assert service._wind_down_until is None
+
+    async def test_restart_during_wind_down_resumes_it(self, tmp_path, clock):
+        clock.set(20, 30)
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0}, cfg_kwargs=WIND_DOWN,
+            modes={"A": AcMode.HEAT}, powers={"A": AcPowerState.ON},
+        )
+        await run_pass(service, ctl)
+        assert power_commands(commands) == []
+        assert ctl.winding_down
+        clock.set(21, 0)  # limit counted from the window start, not the restart
+        await run_pass(service, ctl)
+        assert power_commands(commands) == [("A", "power", AcPowerControl.TURN_OFF)]
+
+    async def test_restart_after_wind_down_leaves_units_alone(self, tmp_path, clock):
+        clock.set(21, 30)
+        service, ctl, units, commands = build(
+            tmp_path, clock, {"A": 20.0, "B": 22.0}, cfg_kwargs=WIND_DOWN,
+            modes={"A": AcMode.HEAT}, powers={"A": AcPowerState.ON},
+        )
+        await run_pass(service, ctl)
+        assert commands == []
+
+    async def test_status_and_history_show_policy_activity(self, tmp_path, clock):
+        service, ctl, units, commands = await self.heating_at_window_start(
+            tmp_path, clock)
+        rows = {r[0]: r for r in ctl.history_rows(suspended=True)}
+        assert rows["A"][5] == "heating"
+        _, lines = ctl.status_report(0.0, suspended=True)
+        assert "heating to" in lines[1]
 
 
 class TestPause:

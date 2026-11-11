@@ -105,6 +105,7 @@ def make_config(**overrides) -> Config:
         weather_path="/data/report/",
         log_path=None,
         shutdown_windows=(),
+        shutdown_wind_down=0.0,  # immediate off pass unless a test opts in
         override_path=Path("/nonexistent/control_override.json"),
         groups=(GroupConfig(name="g", master="A", members=("A", "B")),),
         rooms={"A": RoomConfig(21.0, 24.0), "B": RoomConfig(21.0, 24.0)},

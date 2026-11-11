@@ -136,9 +136,17 @@ All thresholds live in `config.toml`. Temperatures can be `None` — handle that
 when reading `current_temperature`.
 
 `[shutdown]` windows (`"HH:MM-HH:MM"` local time, may cross midnight) switch
-everything off for night/away periods: when a window starts, one off pass
-powers every unit off (bypassing `min_power_toggle_minutes`) and the control
-policy is suspended for the rest of the window. A unit switched on manually
+everything off for night/away periods. When a window starts on schedule,
+units already running *wind down* (`wind_down_minutes`, default 60): each
+keeps running under the normal policy until its room is satisfied and is then
+switched off the normal way (compressor hold and pending-off quieting
+included); nothing new starts, no mode changes, and whatever is still on at
+the limit is forced off (`GroupController.wind_down`; the deadline lives on
+`ClimateService._wind_down_until` so reconnects and restarts within it
+carry on). A dashboard "Turn off", a resume from pause inside a window, or
+`wind_down_minutes = 0` instead run one immediate off pass (bypassing
+`min_power_toggle_minutes`). Either way the control policy is then suspended
+for the rest of the window. A unit switched on manually
 during the window is left on — including across service restarts: a restart
 mid-window assumes the off pass already ran (so a window that begins while
 the service is down gets none). The dashboard's "Turn on"/"Turn off" button
